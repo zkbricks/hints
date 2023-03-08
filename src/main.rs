@@ -57,13 +57,17 @@ fn main() {
     //t(X) = ParSumW(ω · X) − ParSumW(X) − W(ω · X) · b(ω · X)
     let t_of_x = psw_of_ωx.sub(&psw_of_x).sub(&w_of_ωx.mul(&b_of_ωx));
     let z_of_x = compute_vanishing_poly(n); //returns Z(X) = X^n - 1
-    let q_of_x = t_of_x.div(&z_of_x);
+    let q2_of_x = t_of_x.div(&z_of_x);
+
+    let t_of_x = b_of_x.mul(&b_of_x).sub(&b_of_x);
+    let q1_of_x = t_of_x.div(&z_of_x);
     
     test_poly_domain_mult(&w_of_x, &w_of_ωx, &ω);
     test_poly_domain_mult(&b_of_x, &b_of_ωx, &ω);
     test_poly_domain_mult(&psw_of_x, &psw_of_ωx, &ω);
 
-    sanity_test_psw(&w_of_x, &b_of_x, &psw_of_x, &q_of_x);
+    sanity_test_psw(&w_of_x, &b_of_x, &psw_of_x, &q2_of_x);
+    sanity_test_b(&b_of_x, &q1_of_x);
 
 }
 
@@ -72,8 +76,8 @@ fn test_poly_domain_mult(f_of_x: &DensePolynomial<F>, f_of_ωx: &DensePolynomial
     let r = F::rand(&mut rng);
     let ωr: F = ω.clone() * r;
 
-    println!("f(x) at ωr = {:?}", f_of_x.evaluate(&ωr));
-    println!("f(ωx) at r = {:?}", f_of_ωx.evaluate(&r));
+    //println!("f(x) at ωr = {:?}", f_of_x.evaluate(&ωr));
+    //println!("f(ωx) at r = {:?}", f_of_ωx.evaluate(&r));
     assert_eq!(f_of_x.evaluate(&ωr), f_of_ωx.evaluate(&r));
 }
 
@@ -101,6 +105,29 @@ fn poly_domain_mult_ω(f: &DensePolynomial<F>, ω: &F) -> DensePolynomial<F> {
     new_poly
 }
 
+fn sanity_test_b(
+    b_of_x: &DensePolynomial<F>,
+    q_of_x: &DensePolynomial<F>
+) {
+
+    let mut rng = test_rng();
+    let r = F::rand(&mut rng);
+
+    let n: u64 = (b_of_x.degree() + 1) as u64;
+
+    let b_of_r = b_of_x.evaluate(&r);
+    let q_of_r = q_of_x.evaluate(&r);
+    let vanishing_of_r: F = r.pow([n]) - F::from(1);
+
+    //ParSumW(ωr) − ParSumW(r) − W(ωr) · b(ωr) = Q2(r) · (r^n − 1)
+    let tmp1 = b_of_r * b_of_r - b_of_r;
+    let tmp2 = q_of_r * vanishing_of_r;
+    //println!("ParSumW(ωr) - ParSumW(r) - W(ωr)·b(ωr) = {:?}", tmp1);
+    //println!("Q(r) · (r^n - 1) = {:?}", tmp2);
+    assert_eq!(tmp1, tmp2);
+
+}
+
 fn sanity_test_psw(
     w_of_x: &DensePolynomial<F>,
     b_of_x: &DensePolynomial<F>,
@@ -112,13 +139,10 @@ fn sanity_test_psw(
     let r = F::rand(&mut rng);
 
     let n: u64 = (b_of_x.degree() + 1) as u64;
-    println!("n = {:?}", n);
     let domain = Radix2EvaluationDomain::<F>::new(8).unwrap();
     let ω: F = domain.group_gen;
     let ω_pow_n_minus_1: F = ω.pow([n-1]);
     let ωr: F = ω * r;
-
-    println!("---------- sanity test ----------");
 
     let psw_of_r = psw_of_x.evaluate(&r);
     let psw_of_ωr = psw_of_x.evaluate(&ωr);
@@ -130,13 +154,18 @@ fn sanity_test_psw(
     //ParSumW(ωr) − ParSumW(r) − W(ωr) · b(ωr) = Q2(r) · (r^n − 1)
     let tmp1 = psw_of_ωr - psw_of_r - w_of_ωr * b_of_ωr;
     let tmp2 = q_of_r * vanishing_of_r;
-    println!("ParSumW(ωr) - ParSumW(r) - W(ωr)·b(ωr) = {:?}", tmp1);
-    println!("Q(r) · (r^n - 1) = {:?}", tmp2);
+    //println!("ParSumW(ωr) - ParSumW(r) - W(ωr)·b(ωr) = {:?}", tmp1);
+    //println!("Q(r) · (r^n - 1) = {:?}", tmp2);
     assert_eq!(tmp1, tmp2);
 
     //ParSumW(ωn−1) = 0
     let psw_of_ω_pow_n_minus_1 = psw_of_x.evaluate(&ω_pow_n_minus_1);
-    println!("ParSumW(ω^(n-1)) = {:?}", psw_of_ω_pow_n_minus_1);
+    //println!("ParSumW(ω^(n-1)) = {:?}", psw_of_ω_pow_n_minus_1);
+    assert_eq!(psw_of_ω_pow_n_minus_1, F::from(0));
+
+    let b_of_ω_pow_n_minus_1 = b_of_x.evaluate(&ω_pow_n_minus_1);
+    assert_eq!(b_of_ω_pow_n_minus_1, F::from(1));
+
 }
 
 fn compute_w_poly(weights: &Vec<u64>, bitmap: &Vec<u64>) -> DensePolynomial<F> {
@@ -206,8 +235,7 @@ fn _lagrange_poly(n: usize, i: usize) -> DensePolynomial<F> {
 
     //powers of nth root of unity
     let domain = Radix2EvaluationDomain::<F>::new(n).unwrap();
-    let eval_form = 
-        Evaluations::from_vec_and_domain(evals, domain);
+    let eval_form = Evaluations::from_vec_and_domain(evals, domain);
     //interpolated polynomial over the n points
     eval_form.interpolate()
 }
