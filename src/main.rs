@@ -10,6 +10,84 @@ use ark_std::{UniformRand, test_rng, ops::*};
 
 type F = ark_bls12_381::Fr;
 
+struct Proof {
+    r: F,
+    psw_of_r: F,
+    psw_of_ωr: F,
+    psw_of_ω_pow_n_minus_1: F,
+    w_of_ωr: F,
+    b_of_r: F,
+    b_of_ωr: F,
+    b_of_ω_pow_n_minus_1: F,
+    psw_wff_q_of_r: F,
+    b_wff_q_of_r: F,
+}
+
+fn prove(weights: &Vec<u64>, bitmap: &Vec<u64>) -> Proof {
+    // compute the nth root of unity
+    let n: u64 = 8;
+
+    let mut rng = test_rng();
+    let r = F::rand(&mut rng);
+
+    let domain = Radix2EvaluationDomain::<F>::new(8).unwrap();
+    let ω: F = domain.group_gen;
+    let ωr: F = ω * r;
+    let ω_pow_n_minus_1: F = ω.pow([n-1]);
+
+    let w_of_x = compute_w_poly(&weights, &bitmap);
+    let w_of_ωx = poly_domain_mult_ω(&w_of_x, &ω);
+
+    let b_of_x = compute_b_poly(&bitmap);
+    let b_of_ωx = poly_domain_mult_ω(&b_of_x, &ω);
+
+    let psw_of_x = compute_psw_poly(&weights, &bitmap);
+    let psw_of_ωx = poly_domain_mult_ω(&psw_of_x, &ω);
+
+    let z_of_x = compute_vanishing_poly(n); //returns Z(X) = X^n - 1
+
+    //t(X) = ParSumW(ω · X) − ParSumW(X) − W(ω · X) · b(ω · X)
+    let t_of_x = psw_of_ωx.sub(&psw_of_x).sub(&w_of_ωx.mul(&b_of_ωx));
+    let psw_wff_q_of_x = t_of_x.div(&z_of_x);
+
+    let t_of_x = b_of_x.mul(&b_of_x).sub(&b_of_x);
+    let b_wff_q_of_x = t_of_x.div(&z_of_x);
+    
+    Proof {
+        r,
+        psw_of_r: psw_of_x.evaluate(&r),
+        psw_of_ωr: psw_of_x.evaluate(&ωr),
+        psw_of_ω_pow_n_minus_1: psw_of_x.evaluate(&ω_pow_n_minus_1),
+        w_of_ωr: w_of_x.evaluate(&ωr),
+        b_of_r: b_of_x.evaluate(&r),
+        b_of_ωr: b_of_x.evaluate(&ωr),
+        b_of_ω_pow_n_minus_1: b_of_x.evaluate(&ω_pow_n_minus_1),
+        psw_wff_q_of_r: psw_wff_q_of_x.evaluate(&r),
+        b_wff_q_of_r: b_wff_q_of_x.evaluate(&r),
+    }
+}
+
+fn verify(π: &Proof) {
+    let n: u64 = 8;
+    let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
+
+    //b(r) * b(r) - b(r) = Q(r) · (r^n − 1)
+    let tmp1 = π.b_of_r * π.b_of_r - π.b_of_r;
+    let tmp2 = π.b_wff_q_of_r * vanishing_of_r;
+    assert_eq!(tmp1, tmp2);
+
+    //ParSumW(ωr) − ParSumW(r) − W(ωr) · b(ωr) = Q'(r) · (r^n − 1)
+    let tmp1 = π.psw_of_ωr - π.psw_of_r - π.w_of_ωr * π.b_of_ωr;
+    let tmp2 = π.psw_wff_q_of_r * vanishing_of_r;
+    assert_eq!(tmp1, tmp2);
+
+    //ParSumW(ωn−1) = 0
+    assert_eq!(π.psw_of_ω_pow_n_minus_1, F::from(0));
+
+    //b(ωn−1) = 1
+    assert_eq!(π.b_of_ω_pow_n_minus_1, F::from(1));
+}
+
 fn main() {
     // set n to the desired positive integer
     // let n: u64 = 8;
@@ -69,6 +147,8 @@ fn main() {
     sanity_test_psw(&w_of_x, &b_of_x, &psw_of_x, &q2_of_x);
     sanity_test_b(&b_of_x, &q1_of_x);
 
+    let π = prove(&weights, &bitmap);
+    verify(&π);
 }
 
 fn test_poly_domain_mult(f_of_x: &DensePolynomial<F>, f_of_ωx: &DensePolynomial<F>, ω: &F) {
@@ -128,6 +208,7 @@ fn sanity_test_b(
 
 }
 
+
 fn sanity_test_psw(
     w_of_x: &DensePolynomial<F>,
     b_of_x: &DensePolynomial<F>,
@@ -163,6 +244,7 @@ fn sanity_test_psw(
     //println!("ParSumW(ω^(n-1)) = {:?}", psw_of_ω_pow_n_minus_1);
     assert_eq!(psw_of_ω_pow_n_minus_1, F::from(0));
 
+    //b(ωn−1) = 1
     let b_of_ω_pow_n_minus_1 = b_of_x.evaluate(&ω_pow_n_minus_1);
     assert_eq!(b_of_ω_pow_n_minus_1, F::from(1));
 
