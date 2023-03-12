@@ -1,3 +1,5 @@
+use std::os::unix::process::parent_id;
+
 use ark_ff::{Field, /* FftField */ };
 use ark_poly::{
     Polynomial,
@@ -7,8 +9,8 @@ use ark_poly::{
     Evaluations
 };
 use ark_std::{UniformRand, test_rng, ops::*};
-use ark_bls12_381::Bls12_381;
-use ark_ec::pairing::Pairing;
+use ark_bls12_381::{Bls12_381, g1};
+use ark_ec::{pairing::Pairing, CurveGroup};
 
 use kzg::*;
 
@@ -17,6 +19,8 @@ mod kzg;
 
 type UniPoly381 = DensePolynomial<<Bls12_381 as Pairing>::ScalarField>;
 type F = ark_bls12_381::Fr;
+type G1 = <Bls12_381 as Pairing>::G1Affine;
+type G2 = <Bls12_381 as Pairing>::G2Affine;
 
 struct Proof {
     r: F,
@@ -29,11 +33,18 @@ struct Proof {
     b_of_ω_pow_n_minus_1: F,
     psw_wff_q_of_r: F,
     b_wff_q_of_r: F,
+    b_com: G1,
+    sk_q1_com: G1,
+    sk_q2_com: G1,
+    agg_pk: G1
 }
 
-struct PartyParams {
-    q1_coms : Vec<Vec<<Bls12_381 as Pairing>::G1Affine>>,
-    q2_coms : Vec<<Bls12_381 as Pairing>::G1Affine>
+struct PreprocessedParams {
+    q1_coms : Vec<Vec<G1>>,
+    q2_coms : Vec<G1>,
+    sk_com: G2,
+    vanishing_com: G2,
+    x_monomial_com: G2
 }
 
 fn main() {
@@ -71,16 +82,35 @@ fn main() {
         q1_coms.push(q1_setup);
         q2_coms.push(q2_setup);
     }
-    let pp = PartyParams { q1_coms, q2_coms };
 
-    let π = prove(&pp, &weights, &bitmap);
-    verify(&π);
+    //let us cheat for now; we will only use the commmitment anyways
+    let sk_of_x = compute_poly(&sk);
+    let sk_com = KZG10::<Bls12_381, UniPoly381>::
+        commit_g2(&params, &sk_of_x).unwrap();
+    let agg_sk = aggregate_sk(&sk, &bitmap);
+    let agg_sk_as_poly = utils::compute_constant_poly(&agg_sk);
+    let agg_pk = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &agg_sk_as_poly).unwrap();
+
+    let z_of_x = utils::compute_vanishing_poly(n as u64);
+    let vanishing_com = KZG10::<Bls12_381, UniPoly381>::
+        commit_g2(&params, &z_of_x).unwrap();
+
+    let x_monomial = utils::compute_x_monomial();
+    let x_monomial_com = KZG10::<Bls12_381, UniPoly381>::
+        commit_g2(&params, &x_monomial).unwrap();
+
+    let pp = PreprocessedParams { q1_coms, q2_coms, sk_com, vanishing_com, x_monomial_com };
+
+    let π = prove(&params, &pp, &weights, &bitmap, &agg_pk);
+    verify(&params, &pp, &π);
 }
 
 fn prove(
-    params: &PartyParams, 
+    params: &UniversalParams<Bls12_381>,
+    pp: &PreprocessedParams, 
     weights: &Vec<F>, 
-    bitmap: &Vec<F>) -> Proof {
+    bitmap: &Vec<F>,
+    agg_pk: &G1) -> Proof {
     // compute the nth root of unity
     let n: u64 = 8;
 
@@ -97,6 +127,7 @@ fn prove(
 
     let b_of_x = compute_poly(&bitmap);
     let b_of_ωx = utils::poly_domain_mult_ω(&b_of_x, &ω);
+    let b_com = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_of_x).unwrap();
 
     let psw_of_x = compute_psw_poly(&weights, &bitmap);
     let psw_of_ωx = utils::poly_domain_mult_ω(&psw_of_x, &ω);
@@ -110,6 +141,9 @@ fn prove(
     let t_of_x = b_of_x.mul(&b_of_x).sub(&b_of_x);
     let b_wff_q_of_x = t_of_x.div(&z_of_x);
 
+    let sk_q1_com = compute_sk_q1_com(&pp, &bitmap);
+    let sk_q2_com = compute_sk_q2_com(&pp, &bitmap);
+
     Proof {
         r,
         psw_of_r: psw_of_x.evaluate(&r),
@@ -121,12 +155,25 @@ fn prove(
         b_of_ω_pow_n_minus_1: b_of_x.evaluate(&ω_pow_n_minus_1),
         psw_wff_q_of_r: psw_wff_q_of_x.evaluate(&r),
         b_wff_q_of_r: b_wff_q_of_x.evaluate(&r),
+        b_com: b_com,
+        sk_q1_com: sk_q1_com,
+        sk_q2_com: sk_q2_com,
+        agg_pk: agg_pk.clone(),
     }
 }
 
-fn verify(π: &Proof) {
+
+
+fn verify(params: &UniversalParams<Bls12_381>, pp: &PreprocessedParams, π: &Proof) {
     let n: u64 = 8;
     let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
+
+    let lhs = <Bls12_381 as Pairing>::pairing(&π.b_com, &pp.sk_com);
+    let x1 = <Bls12_381 as Pairing>::pairing(&π.sk_q1_com, &pp.vanishing_com);
+    let x2 = <Bls12_381 as Pairing>::pairing(&π.sk_q2_com, &pp.x_monomial_com);
+    let x3 = <Bls12_381 as Pairing>::pairing(&π.agg_pk, &params.powers_of_h[0]);
+    let rhs = x1.add(x2).add(x3);
+    assert_eq!(lhs, rhs);
 
     //b(r) * b(r) - b(r) = Q(r) · (r^n − 1)
     let tmp1 = π.b_of_r * π.b_of_r - π.b_of_r;
@@ -144,6 +191,42 @@ fn verify(π: &Proof) {
     //b(ωn−1) = 1
     assert_eq!(π.b_of_ω_pow_n_minus_1, F::from(1));
 }
+
+fn compute_com_add_poly(accumulator: &Option<G1>, addition: &G1) -> Option<G1> {
+    match accumulator {
+        Some(c) => Some(c.add(addition).into_affine()),
+        None => Some(addition.clone())
+    }
+}
+
+fn compute_sk_q1_com(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
+    let mut q1_com = None;
+    for i in 0..bitmap.len() {
+        if bitmap[i] == F::from(1) {
+            let mut party_i_q1_com = pp.q1_coms[i][i].clone();
+            for j in 0..bitmap.len() {
+                if i != j {
+                    let party_j_contribution = pp.q1_coms[j][i].clone();
+                    party_i_q1_com = party_i_q1_com.add(party_j_contribution).into();
+                }
+            }
+            q1_com = compute_com_add_poly(&q1_com, &party_i_q1_com);
+        }
+    }
+    q1_com.unwrap()
+}
+
+fn compute_sk_q2_com(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
+    let mut q2_com = None;
+    for i in 0..bitmap.len() {
+        if bitmap[i] == F::from(1) {
+            let party_i_q2_com = pp.q2_coms[i].clone();
+            q2_com = compute_com_add_poly(&q2_com, &party_i_q2_com);
+        }
+    }
+    q2_com.unwrap()
+}
+
 
 fn sample_secret_keys(num_parties: usize) -> Vec<F> {
     let mut rng = test_rng();
@@ -225,22 +308,20 @@ fn party_i_q1_setup_material(
     (q1_material, q2_com)
 }
 
-
+fn aggregate_sk(sk: &Vec<F>, bitmap: &Vec<F>) -> F {
+    let n = sk.len();
+    let mut agg_sk = F::from(0);
+    for i in 0..sk.len() {
+        let l_i_of_x = utils::lagrange_poly(n, i);
+        let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+        agg_sk += bitmap[i] * sk[i] * l_i_of_0;
+    }
+    agg_sk
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn aggregate_sk(sk: &Vec<F>, bitmap: &Vec<F>) -> F {
-        let n = sk.len();
-        let mut agg_sk = F::from(0);
-        for i in 0..sk.len() {
-            let l_i_of_x = utils::lagrange_poly(n, i);
-            let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
-            agg_sk += bitmap[i] * sk[i] * l_i_of_0;
-        }
-        agg_sk
-    }
 
     fn sanity_test_poly_domain_mult(
         f_of_x: &DensePolynomial<F>, 
