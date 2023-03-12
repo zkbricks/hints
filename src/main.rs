@@ -7,9 +7,15 @@ use ark_poly::{
     Evaluations
 };
 use ark_std::{UniformRand, test_rng, ops::*};
+use ark_bls12_381::Bls12_381;
+use ark_ec::pairing::Pairing;
+
+use kzg::*;
 
 mod utils;
+mod kzg;
 
+type UniPoly381 = DensePolynomial<<Bls12_381 as Pairing>::ScalarField>;
 type F = ark_bls12_381::Fr;
 
 struct Proof {
@@ -25,8 +31,14 @@ struct Proof {
     b_wff_q_of_r: F,
 }
 
+struct PartyParams {
+    q1_coms : Vec<Vec<<Bls12_381 as Pairing>::G1Affine>>,
+    q2_coms : Vec<<Bls12_381 as Pairing>::G1Affine>
+}
+
 fn main() {
     //let secret_keys: Vec<F> = sample_secret_keys(n-1);
+    let n = 8;
     let weights: Vec<F> = vec![
         F::from(2), 
         F::from(3), 
@@ -47,12 +59,28 @@ fn main() {
         F::from(1), 
         F::from(1)
     ];
+    let sk: Vec<F> = sample_secret_keys(n - 1);
 
-    let π = prove(&weights, &bitmap);
+    let rng = &mut test_rng();
+    let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
+
+    let mut q1_coms : Vec<Vec<<Bls12_381 as Pairing>::G1Affine>> = vec![];
+    let mut q2_coms : Vec<<Bls12_381 as Pairing>::G1Affine> = vec![];
+    for i in 0..n {
+        let (q1_setup, q2_setup) = party_i_q1_setup_material(&params, n, i, &sk[i]);
+        q1_coms.push(q1_setup);
+        q2_coms.push(q2_setup);
+    }
+    let pp = PartyParams { q1_coms, q2_coms };
+
+    let π = prove(&pp, &weights, &bitmap);
     verify(&π);
 }
 
-fn prove(weights: &Vec<F>, bitmap: &Vec<F>) -> Proof {
+fn prove(
+    params: &PartyParams, 
+    weights: &Vec<F>, 
+    bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
     let n: u64 = 8;
 
@@ -81,7 +109,7 @@ fn prove(weights: &Vec<F>, bitmap: &Vec<F>) -> Proof {
 
     let t_of_x = b_of_x.mul(&b_of_x).sub(&b_of_x);
     let b_wff_q_of_x = t_of_x.div(&z_of_x);
-    
+
     Proof {
         r,
         psw_of_r: psw_of_x.evaluate(&r),
@@ -117,6 +145,16 @@ fn verify(π: &Proof) {
     assert_eq!(π.b_of_ω_pow_n_minus_1, F::from(1));
 }
 
+fn sample_secret_keys(num_parties: usize) -> Vec<F> {
+    let mut rng = test_rng();
+    let mut keys = vec![];
+    for _ in 0..num_parties {
+        keys.push(F::rand(&mut rng));
+    }
+    keys.push(F::from(0));
+    keys
+}
+
 fn compute_poly(v: &Vec<F>) -> DensePolynomial<F> {
     let n = v.len();
     let mut evals = vec![];
@@ -144,23 +182,54 @@ fn compute_psw_poly(weights: &Vec<F>, bitmap: &Vec<F>) -> DensePolynomial<F> {
     eval_form.interpolate()    
 }
 
+fn party_i_q1_setup_material(
+    params: &UniversalParams<Bls12_381>,
+    n: usize, 
+    i: usize, 
+    sk_i: &F) -> 
+    (Vec<<Bls12_381 as Pairing>::G1Affine>, 
+        <Bls12_381 as Pairing>::G1Affine) {
+    //let us compute the q1 term
+    let l_i_of_x = utils::lagrange_poly(n, i);
+    let z_of_x = utils::compute_vanishing_poly(n as u64);
+
+    let mut q1_material = vec![];
+    //let us compute the cross terms of q1
+    for j in 0..n {
+        let num: DensePolynomial<F>;// = compute_constant_poly(&F::from(0));
+        if i == j {
+            num = l_i_of_x.clone().mul(&l_i_of_x).sub(&l_i_of_x);
+        } else { //cross-terms
+            let l_j_of_x = utils::lagrange_poly(n, j);
+            num = l_j_of_x.mul(&l_i_of_x);
+        }
+        let f = num.div(&z_of_x);
+        let sk_times_f = utils::poly_eval_mult_c(&f, &sk_i);
+
+        let com = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_times_f)
+            .expect("commitment failed");
+
+        q1_material.push(com);
+    }
+
+    let x_monomial = utils::compute_x_monomial();
+    let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+    let l_i_of_0_poly = utils::compute_constant_poly(&l_i_of_0);
+    let num = l_i_of_x.sub(&l_i_of_0_poly);
+    let den = x_monomial.clone();
+    let f = num.div(&den);
+    let sk_times_f = utils::poly_eval_mult_c(&f, &sk_i);
+    let q2_com = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_times_f)
+            .expect("commitment failed");
+
+    (q1_material, q2_com)
+}
+
 
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::compute_x_monomial;
-
     use super::*;
-
-    fn sample_secret_keys(num_parties: usize) -> Vec<F> {
-        let mut rng = test_rng();
-        let mut keys = vec![];
-        for _ in 0..num_parties {
-            keys.push(F::rand(&mut rng));
-        }
-        keys.push(F::from(0));
-        keys
-    }
 
     fn aggregate_sk(sk: &Vec<F>, bitmap: &Vec<F>) -> F {
         let n = sk.len();
@@ -366,9 +435,9 @@ mod tests {
             if bitmap[i] == F::from(0) { continue; }
 
             let l_i_of_x = utils::lagrange_poly(n, i);
-            let num = l_i_of_x.clone().mul(&l_i_of_x);
-            let num = num.sub(&l_i_of_x);
-            let f_i = num.div(&z_of_x.clone());
+            let num = l_i_of_x.mul(&l_i_of_x).sub(&l_i_of_x);
+            //let num = num.sub(&l_i_of_x);
+            let f_i = num.div(&z_of_x);
             let sk_i_f_i = utils::poly_eval_mult_c(&f_i, &sk[i]);
 
             q1 = q1.add(sk_i_f_i);
@@ -379,13 +448,13 @@ mod tests {
 
                 let l_j_of_x = utils::lagrange_poly(n, j);
                 let num = l_j_of_x.mul(&l_i_of_x);
-                let f_j = num.div(&z_of_x.clone());
+                let f_j = num.div(&z_of_x);
                 let sk_j_f_j = utils::poly_eval_mult_c(&f_j, &sk[j]);
 
-                q1_inner = q1_inner.clone().add(sk_j_f_j);
+                q1_inner = q1_inner.add(sk_j_f_j);
             }
 
-            q1 = q1.clone().add(q1_inner);
+            q1 = q1.add(q1_inner);
         }
         q1
     }
@@ -395,7 +464,7 @@ mod tests {
         bitmap: &Vec<F>
     ) -> DensePolynomial<F> {
         let n = sk.len();
-        let x_monomial = compute_x_monomial();
+        let x_monomial = utils::compute_x_monomial();
 
         let mut q2 = utils::compute_constant_poly(&F::from(0));
 

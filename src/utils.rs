@@ -1,4 +1,4 @@
-#[allow(dead_code)]
+#![allow(dead_code)]
 
 use ark_ff::{Field, /* FftField */ };
 use ark_poly::{
