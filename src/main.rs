@@ -49,48 +49,54 @@ struct PreprocessedParams {
     x_monomial_com: G2
 }
 
-fn main() {
-    let n = 8;
-    let weights: Vec<F> = vec![
-        F::from(2), 
-        F::from(3), 
-        F::from(4), 
-        F::from(5), 
-        F::from(4), 
-        F::from(3), 
-        F::from(2), 
-        F::from(0)-F::from(15)
-    ];
-    let bitmap: Vec<F> = vec![
-        F::from(1),
-        F::from(1), 
-        F::from(0), 
-        F::from(1), 
-        F::from(0), 
-        F::from(1), 
-        F::from(1), 
-        F::from(1)
-    ];
-    let sk: Vec<F> = sample_secret_keys(n - 1);
+fn sample_weights(n: usize) -> Vec<F> {
+    let mut rng = &mut test_rng();
+    (0..n).map(|_| F::from(u64::rand(&mut rng))).collect()
+}
 
+fn sample_bitmap(n: usize) -> Vec<F> {
+    let mut rng = &mut test_rng();
+    let mut bitmap = vec![];
+    for _i in 0..n {
+        let r = u64::rand(&mut rng);
+        bitmap.push(F::from(r % 2));
+    }
+    bitmap
+}
+
+fn main() {
+    let n = 64;
     let rng = &mut test_rng();
+
+    let mut sk: Vec<F> = sample_secret_keys(n - 1);
+    let mut bitmap = sample_bitmap(n - 1);
+    let mut weights = sample_weights(n - 1);
+
+    let total_active_weight = bitmap
+        .iter()
+        .zip(weights.iter())
+        .fold(F::from(0), |acc, (&x, &y)| acc + (x * y));
+
+    bitmap.push(F::from(1));
+    weights.push(F::from(0) - total_active_weight);
+    sk.push(F::from(0));
+
     let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
 
     let mut q1_contributions : Vec<Vec<G1>> = vec![];
     let mut q2_coms : Vec<G1> = vec![];
     let mut pks : Vec<G1> = vec![];
+    let mut com_sks: Vec<G2> = vec![];
     for i in 0..n {
-        let (pk_i, q1_i, q2_i) = party_i_setup_material(&params, n, i, &sk[i]);
+        let (pk_i, com_sk_l_i, q1_i, q2_i) = 
+            party_i_setup_material(&params, n, i, &sk[i]);
         q1_contributions.push(q1_i);
         q2_coms.push(q2_i);
         pks.push(pk_i);
+        com_sks.push(com_sk_l_i);
     }
     let q1_coms = preprocess_q1_contributions(&q1_contributions);
-
-    //let us cheat for now; we will only use the commmitment anyways
-    let sk_of_x = compute_poly(&sk);
-    let sk_com = KZG10::<Bls12_381, UniPoly381>::
-        commit_g2(&params, &sk_of_x).unwrap();
+    let sk_com = add_all_g2(&params, &com_sks);
 
     let z_of_x = utils::compute_vanishing_poly(n as u64);
     let vanishing_com = KZG10::<Bls12_381, UniPoly381>::
@@ -246,9 +252,24 @@ fn filter_and_add(
     com
 }
 
+fn add_all_g2(
+    params: &UniversalParams<Bls12_381>, 
+    elements: &Vec<G2>) -> G2 {
+    let mut com = get_zero_poly_com_g2(&params);
+    for i in 0..elements.len() {
+        com = com.add(elements[i]).into_affine();
+    }
+    com
+}
+
 fn get_zero_poly_com_g1(params: &UniversalParams<Bls12_381>) -> G1 {
     let zero_poly = utils::compute_constant_poly(&F::from(0));
     KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &zero_poly).unwrap()
+}
+
+fn get_zero_poly_com_g2(params: &UniversalParams<Bls12_381>) -> G2 {
+    let zero_poly = utils::compute_constant_poly(&F::from(0));
+    KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &zero_poly).unwrap()
 }
 
 fn sample_secret_keys(num_parties: usize) -> Vec<F> {
@@ -257,7 +278,6 @@ fn sample_secret_keys(num_parties: usize) -> Vec<F> {
     for _ in 0..num_parties {
         keys.push(F::rand(&mut rng));
     }
-    keys.push(F::from(0));
     keys
 }
 
@@ -292,7 +312,7 @@ fn party_i_setup_material(
     params: &UniversalParams<Bls12_381>,
     n: usize, 
     i: usize, 
-    sk_i: &F) -> (G1, Vec<G1>, G1) {
+    sk_i: &F) -> (G1, G2, Vec<G1>, G1) {
     //let us compute the q1 term
     let l_i_of_x = utils::lagrange_poly(n, i);
     let z_of_x = utils::compute_vanishing_poly(n as u64);
@@ -331,7 +351,11 @@ fn party_i_setup_material(
     let pk = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_as_poly)
         .expect("commitment failed");
 
-    (pk, q1_material, q2_com)
+    let sk_times_l_i_of_x = utils::poly_eval_mult_c(&l_i_of_x, &sk_i);
+    let com_sk_l_i = KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &sk_times_l_i_of_x)
+        .expect("commitment failed");
+
+    (pk, com_sk_l_i, q1_material, q2_com)
 }
 
 
@@ -520,7 +544,9 @@ mod tests {
         ];
 
         let n = bitmap.len();
-        let secret_keys: Vec<F> = sample_secret_keys(n -1);
+
+        let mut secret_keys: Vec<F> = sample_secret_keys(n - 1);
+        secret_keys.push(F::from(0));
 
         let agg_sk = aggregate_sk(&secret_keys, &bitmap);
         println!("agg_sk = {:?}", agg_sk);

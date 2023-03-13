@@ -165,13 +165,12 @@ where
         let d = polynomial.degree();
         check_degree_is_too_large(d, params.powers_of_h.len())?;
 
-        let (num_leading_zeros, plain_coeffs) =
-            skip_leading_zeros_and_convert_to_bigints(polynomial);
+        let plain_coeffs = convert_to_bigints(&polynomial.coeffs());
 
         let powers_of_h = &params.powers_of_h[..=d].to_vec();
         //let msm_time = start_timer!(|| "MSM to compute commitment to plaintext poly");
         let commitment = <E::G2 as VariableBaseMSM>::msm_bigint(
-            &powers_of_h[num_leading_zeros..],
+            &powers_of_h[..],
             &plain_coeffs,
         );
         //end_timer!(msm_time);
