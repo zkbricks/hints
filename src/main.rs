@@ -1,4 +1,4 @@
-use std::os::unix::process::parent_id;
+use std::time::{Instant};
 
 use ark_ff::{Field, /* FftField */ };
 use ark_poly::{
@@ -9,7 +9,7 @@ use ark_poly::{
     Evaluations
 };
 use ark_std::{UniformRand, test_rng, ops::*};
-use ark_bls12_381::{Bls12_381, g1};
+use ark_bls12_381::{Bls12_381};
 use ark_ec::{pairing::Pairing, CurveGroup};
 
 use kzg::*;
@@ -40,7 +40,7 @@ struct Proof {
 }
 
 struct PreprocessedParams {
-    q1_coms : Vec<Vec<G1>>,
+    q1_coms : Vec<G1>,
     q2_coms : Vec<G1>,
     sk_com: G2,
     vanishing_com: G2,
@@ -75,13 +75,14 @@ fn main() {
     let rng = &mut test_rng();
     let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
 
-    let mut q1_coms : Vec<Vec<<Bls12_381 as Pairing>::G1Affine>> = vec![];
+    let mut q1_contributions : Vec<Vec<<Bls12_381 as Pairing>::G1Affine>> = vec![];
     let mut q2_coms : Vec<<Bls12_381 as Pairing>::G1Affine> = vec![];
     for i in 0..n {
-        let (q1_setup, q2_setup) = party_i_q1_setup_material(&params, n, i, &sk[i]);
-        q1_coms.push(q1_setup);
-        q2_coms.push(q2_setup);
+        let (q1_i, q2_i) = party_i_q1_setup_material(&params, n, i, &sk[i]);
+        q1_contributions.push(q1_i);
+        q2_coms.push(q2_i);
     }
+    let q1_coms = preprocess_q1_contributions(&q1_contributions);
 
     //let us cheat for now; we will only use the commmitment anyways
     let sk_of_x = compute_poly(&sk);
@@ -101,8 +102,15 @@ fn main() {
 
     let pp = PreprocessedParams { q1_coms, q2_coms, sk_com, vanishing_com, x_monomial_com };
 
+    let start = Instant::now();
     let π = prove(&params, &pp, &weights, &bitmap, &agg_pk);
+    let duration = start.elapsed();
+    println!("Time elapsed in prover is: {:?}", duration);
+
+    let start = Instant::now();
     verify(&params, &pp, &π);
+    let duration = start.elapsed();
+    println!("Time elapsed in verifier is: {:?}", duration);
 }
 
 fn prove(
@@ -141,8 +149,8 @@ fn prove(
     let t_of_x = b_of_x.mul(&b_of_x).sub(&b_of_x);
     let b_wff_q_of_x = t_of_x.div(&z_of_x);
 
-    let sk_q1_com = compute_sk_q1_com(&pp, &bitmap);
-    let sk_q2_com = compute_sk_q2_com(&pp, &bitmap);
+    let sk_q1_com = filter_and_add(&params, &pp.q1_coms, &bitmap);
+    let sk_q2_com = filter_and_add(&params, &pp.q2_coms, &bitmap);
 
     Proof {
         r,
@@ -192,41 +200,42 @@ fn verify(params: &UniversalParams<Bls12_381>, pp: &PreprocessedParams, π: &Pro
     assert_eq!(π.b_of_ω_pow_n_minus_1, F::from(1));
 }
 
-fn compute_com_add_poly(accumulator: &Option<G1>, addition: &G1) -> Option<G1> {
-    match accumulator {
-        Some(c) => Some(c.add(addition).into_affine()),
-        None => Some(addition.clone())
-    }
-}
+fn preprocess_q1_contributions(
+    q1_contributions: &Vec<Vec<G1>>
+) -> Vec<G1> {
+    let n = q1_contributions.len();
+    let mut q1_coms = vec![];
 
-fn compute_sk_q1_com(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
-    let mut q1_com = None;
-    for i in 0..bitmap.len() {
-        if bitmap[i] == F::from(1) {
-            let mut party_i_q1_com = pp.q1_coms[i][i].clone();
-            for j in 0..bitmap.len() {
-                if i != j {
-                    let party_j_contribution = pp.q1_coms[j][i].clone();
-                    party_i_q1_com = party_i_q1_com.add(party_j_contribution).into();
-                }
+    for i in 0..n {
+        let mut party_i_q1_com = q1_contributions[i][i].clone();
+        for j in 0..n {
+            if i != j {
+                let party_j_contribution = q1_contributions[j][i].clone();
+                party_i_q1_com = party_i_q1_com.add(party_j_contribution).into();
             }
-            q1_com = compute_com_add_poly(&q1_com, &party_i_q1_com);
         }
+        q1_coms.push(party_i_q1_com);
     }
-    q1_com.unwrap()
+    q1_coms
 }
 
-fn compute_sk_q2_com(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
-    let mut q2_com = None;
+fn filter_and_add(
+    params: &UniversalParams<Bls12_381>, 
+    elements: &Vec<G1>, 
+    bitmap: &Vec<F>) -> G1 {
+    let mut com = get_zero_poly_com_g1(&params);
     for i in 0..bitmap.len() {
         if bitmap[i] == F::from(1) {
-            let party_i_q2_com = pp.q2_coms[i].clone();
-            q2_com = compute_com_add_poly(&q2_com, &party_i_q2_com);
+            com = com.add(elements[i]).into_affine();
         }
     }
-    q2_com.unwrap()
+    com
 }
 
+fn get_zero_poly_com_g1(params: &UniversalParams<Bls12_381>) -> G1 {
+    let zero_poly = utils::compute_constant_poly(&F::from(0));
+    KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &zero_poly).unwrap()
+}
 
 fn sample_secret_keys(num_parties: usize) -> Vec<F> {
     let mut rng = test_rng();
