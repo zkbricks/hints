@@ -519,7 +519,8 @@ mod tests {
             F::from(1)
         ];
 
-        let secret_keys: Vec<F> = sample_secret_keys(7); //size 8
+        let n = bitmap.len();
+        let secret_keys: Vec<F> = sample_secret_keys(n -1);
 
         let agg_sk = aggregate_sk(&secret_keys, &bitmap);
         println!("agg_sk = {:?}", agg_sk);
