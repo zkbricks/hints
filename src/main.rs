@@ -50,7 +50,6 @@ struct PreprocessedParams {
 }
 
 fn main() {
-    //let secret_keys: Vec<F> = sample_secret_keys(n-1);
     let n = 8;
     let weights: Vec<F> = vec![
         F::from(2), 
@@ -122,12 +121,12 @@ fn prove(
     weights: &Vec<F>, 
     bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
-    let n: u64 = 8;
+    let n: u64 = pp.pks.len() as u64;
 
     let mut rng = test_rng();
     let r = F::rand(&mut rng);
 
-    let domain = Radix2EvaluationDomain::<F>::new(8).unwrap();
+    let domain = Radix2EvaluationDomain::<F>::new(n as usize).unwrap();
     let ω: F = domain.group_gen;
     let ωr: F = ω * r;
     let ω_pow_n_minus_1: F = ω.pow([n-1]);
@@ -188,7 +187,7 @@ fn compute_apk(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
 }
 
 fn verify(params: &UniversalParams<Bls12_381>, pp: &PreprocessedParams, π: &Proof) {
-    let n: u64 = 8;
+    let n: u64 = pp.pks.len() as u64;
     let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
 
     let lhs = <Bls12_381 as Pairing>::pairing(&π.b_com, &pp.sk_com);
@@ -336,20 +335,20 @@ fn party_i_setup_material(
 }
 
 
-// fn _aggregate_sk(sk: &Vec<F>, bitmap: &Vec<F>) -> F {
-//     let n = sk.len();
-//     let mut agg_sk = F::from(0);
-//     for i in 0..sk.len() {
-//         let l_i_of_x = utils::lagrange_poly(n, i);
-//         let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
-//         agg_sk += bitmap[i] * sk[i] * l_i_of_0;
-//     }
-//     agg_sk
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn aggregate_sk(sk: &Vec<F>, bitmap: &Vec<F>) -> F {
+        let n = sk.len();
+        let mut agg_sk = F::from(0);
+        for i in 0..sk.len() {
+            let l_i_of_x = utils::lagrange_poly(n, i);
+            let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+            agg_sk += bitmap[i] * sk[i] * l_i_of_0;
+        }
+        agg_sk
+    }
 
     fn sanity_test_poly_domain_mult(
         f_of_x: &DensePolynomial<F>, 
@@ -395,7 +394,7 @@ mod tests {
         let r = F::rand(&mut rng);
     
         let n: u64 = (b_of_x.degree() + 1) as u64;
-        let domain = Radix2EvaluationDomain::<F>::new(8).unwrap();
+        let domain = Radix2EvaluationDomain::<F>::new(n as usize).unwrap();
         let ω: F = domain.group_gen;
         let ω_pow_n_minus_1: F = ω.pow([n-1]);
         let ωr: F = ω * r;
@@ -428,9 +427,6 @@ mod tests {
     #[test]
     fn sanity_test_public_part() {
         // compute the nth root of unity
-        let n: u64 = 8;
-        let domain = Radix2EvaluationDomain::<F>::new(8).unwrap();
-        let ω: F = domain.group_gen;
         //println!("The nth root of unity is: {:?}", ω);
         //println!("The omega_n_minus_1 of unity is: {:?}", ω.pow([n-1]));
         //println!("The omega_n of unity is: {:?}", ω_pow_n_minus_1 * ω);
@@ -455,6 +451,10 @@ mod tests {
             F::from(1), 
             F::from(1)
         ];
+
+        let n: u64 = bitmap.len() as u64;
+        let domain = Radix2EvaluationDomain::<F>::new(n as usize).unwrap();
+        let ω: F = domain.group_gen;
 
         let w_of_x = compute_poly(&weights);
         let w_of_ωx = utils::poly_domain_mult_ω(&w_of_x, &ω);
@@ -490,7 +490,7 @@ mod tests {
     ) {
         let mut rng = test_rng();
         let r = F::rand(&mut rng);
-        let n: u64 = 8;
+        let n: u64 = (sk_of_x.degree() + 1) as u64;
 
         //SK(x) · B(x) − aSK = Q1(x) · Z(x) + Q2(x) · x
         let sk_of_r = sk_of_x.evaluate(&r);
