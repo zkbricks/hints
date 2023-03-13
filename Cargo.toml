@@ -27,3 +27,6 @@ paste = { version = "1.0" }
 [features]
 asm = [ "ark-ff/asm" ]
 parallel = [ "ark-std/parallel", "ark-ff/parallel",  "ark-ec/parallel", ]
+
+[profile.dev]
+opt-level = 3

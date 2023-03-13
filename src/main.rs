@@ -11,6 +11,7 @@ use ark_poly::{
 use ark_std::{UniformRand, test_rng, ops::*};
 use ark_bls12_381::{Bls12_381};
 use ark_ec::{pairing::Pairing, CurveGroup};
+use ark_ec::{VariableBaseMSM};
 
 use kzg::*;
 
@@ -40,6 +41,7 @@ struct Proof {
 }
 
 struct PreprocessedParams {
+    pks: Vec<G1>,
     q1_coms : Vec<G1>,
     q2_coms : Vec<G1>,
     sk_com: G2,
@@ -75,12 +77,14 @@ fn main() {
     let rng = &mut test_rng();
     let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
 
-    let mut q1_contributions : Vec<Vec<<Bls12_381 as Pairing>::G1Affine>> = vec![];
-    let mut q2_coms : Vec<<Bls12_381 as Pairing>::G1Affine> = vec![];
+    let mut q1_contributions : Vec<Vec<G1>> = vec![];
+    let mut q2_coms : Vec<G1> = vec![];
+    let mut pks : Vec<G1> = vec![];
     for i in 0..n {
-        let (q1_i, q2_i) = party_i_q1_setup_material(&params, n, i, &sk[i]);
+        let (pk_i, q1_i, q2_i) = party_i_setup_material(&params, n, i, &sk[i]);
         q1_contributions.push(q1_i);
         q2_coms.push(q2_i);
+        pks.push(pk_i);
     }
     let q1_coms = preprocess_q1_contributions(&q1_contributions);
 
@@ -88,9 +92,6 @@ fn main() {
     let sk_of_x = compute_poly(&sk);
     let sk_com = KZG10::<Bls12_381, UniPoly381>::
         commit_g2(&params, &sk_of_x).unwrap();
-    let agg_sk = aggregate_sk(&sk, &bitmap);
-    let agg_sk_as_poly = utils::compute_constant_poly(&agg_sk);
-    let agg_pk = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &agg_sk_as_poly).unwrap();
 
     let z_of_x = utils::compute_vanishing_poly(n as u64);
     let vanishing_com = KZG10::<Bls12_381, UniPoly381>::
@@ -100,10 +101,12 @@ fn main() {
     let x_monomial_com = KZG10::<Bls12_381, UniPoly381>::
         commit_g2(&params, &x_monomial).unwrap();
 
-    let pp = PreprocessedParams { q1_coms, q2_coms, sk_com, vanishing_com, x_monomial_com };
+    let pp = PreprocessedParams { 
+        pks, q1_coms, q2_coms, sk_com, vanishing_com, x_monomial_com 
+    };
 
     let start = Instant::now();
-    let π = prove(&params, &pp, &weights, &bitmap, &agg_pk);
+    let π = prove(&params, &pp, &weights, &bitmap);
     let duration = start.elapsed();
     println!("Time elapsed in prover is: {:?}", duration);
 
@@ -117,8 +120,7 @@ fn prove(
     params: &UniversalParams<Bls12_381>,
     pp: &PreprocessedParams, 
     weights: &Vec<F>, 
-    bitmap: &Vec<F>,
-    agg_pk: &G1) -> Proof {
+    bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
     let n: u64 = 8;
 
@@ -151,6 +153,7 @@ fn prove(
 
     let sk_q1_com = filter_and_add(&params, &pp.q1_coms, &bitmap);
     let sk_q2_com = filter_and_add(&params, &pp.q2_coms, &bitmap);
+    let agg_pk = compute_apk(&pp, &bitmap);
 
     Proof {
         r,
@@ -170,7 +173,19 @@ fn prove(
     }
 }
 
+fn compute_apk(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
+    let n = bitmap.len();
+    let mut exponents = vec![];
+    for i in 0..n {
+        let l_i_of_x = utils::lagrange_poly(n, i);
+        let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+        let active = bitmap[i] == F::from(1);
+        exponents.push(if active { l_i_of_0 } else { F::from(0) });
+    }
 
+    <<Bls12_381 as Pairing>::G1 as VariableBaseMSM>
+        ::msm(&pp.pks[..], &exponents).unwrap().into_affine()
+}
 
 fn verify(params: &UniversalParams<Bls12_381>, pp: &PreprocessedParams, π: &Proof) {
     let n: u64 = 8;
@@ -274,13 +289,11 @@ fn compute_psw_poly(weights: &Vec<F>, bitmap: &Vec<F>) -> DensePolynomial<F> {
     eval_form.interpolate()    
 }
 
-fn party_i_q1_setup_material(
+fn party_i_setup_material(
     params: &UniversalParams<Bls12_381>,
     n: usize, 
     i: usize, 
-    sk_i: &F) -> 
-    (Vec<<Bls12_381 as Pairing>::G1Affine>, 
-        <Bls12_381 as Pairing>::G1Affine) {
+    sk_i: &F) -> (G1, Vec<G1>, G1) {
     //let us compute the q1 term
     let l_i_of_x = utils::lagrange_poly(n, i);
     let z_of_x = utils::compute_vanishing_poly(n as u64);
@@ -314,19 +327,25 @@ fn party_i_q1_setup_material(
     let q2_com = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_times_f)
             .expect("commitment failed");
 
-    (q1_material, q2_com)
+    //release my public key
+    let sk_as_poly = utils::compute_constant_poly(&sk_i);
+    let pk = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_as_poly)
+        .expect("commitment failed");
+
+    (pk, q1_material, q2_com)
 }
 
-fn aggregate_sk(sk: &Vec<F>, bitmap: &Vec<F>) -> F {
-    let n = sk.len();
-    let mut agg_sk = F::from(0);
-    for i in 0..sk.len() {
-        let l_i_of_x = utils::lagrange_poly(n, i);
-        let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
-        agg_sk += bitmap[i] * sk[i] * l_i_of_0;
-    }
-    agg_sk
-}
+
+// fn _aggregate_sk(sk: &Vec<F>, bitmap: &Vec<F>) -> F {
+//     let n = sk.len();
+//     let mut agg_sk = F::from(0);
+//     for i in 0..sk.len() {
+//         let l_i_of_x = utils::lagrange_poly(n, i);
+//         let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+//         agg_sk += bitmap[i] * sk[i] * l_i_of_0;
+//     }
+//     agg_sk
+// }
 
 #[cfg(test)]
 mod tests {
