@@ -65,7 +65,9 @@ fn sample_bitmap(n: usize) -> Vec<F> {
 }
 
 fn main() {
-    let n = 64;
+    let n = 1024;
+    println!("n = {}", n);
+
     let rng = &mut test_rng();
 
     let mut sk: Vec<F> = sample_secret_keys(n - 1);
@@ -81,21 +83,31 @@ fn main() {
     weights.push(F::from(0) - total_active_weight);
     sk.push(F::from(0));
 
+    let start = Instant::now();
     let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
+    let duration = start.elapsed();
+    println!("Time elapsed in kzg setup is: {:?}", duration);
 
     let mut q1_contributions : Vec<Vec<G1>> = vec![];
     let mut q2_coms : Vec<G1> = vec![];
     let mut pks : Vec<G1> = vec![];
     let mut com_sks: Vec<G2> = vec![];
     for i in 0..n {
+        let start = Instant::now();
         let (pk_i, com_sk_l_i, q1_i, q2_i) = 
             party_i_setup_material(&params, n, i, &sk[i]);
+        let duration = start.elapsed();
+        println!("Time elapsed in party_i_setup_material is: {:?}", duration);
+        
         q1_contributions.push(q1_i);
         q2_coms.push(q2_i);
         pks.push(pk_i);
         com_sks.push(com_sk_l_i);
     }
+    let start = Instant::now();
     let q1_coms = preprocess_q1_contributions(&q1_contributions);
+    let duration = start.elapsed();
+    println!("Time elapsed in preprocess_q1_contributions is: {:?}", duration);
     let sk_com = add_all_g2(&params, &com_sks);
 
     let z_of_x = utils::compute_vanishing_poly(n as u64);
@@ -114,6 +126,7 @@ fn main() {
     let π = prove(&params, &pp, &weights, &bitmap);
     let duration = start.elapsed();
     println!("Time elapsed in prover is: {:?}", duration);
+    
 
     let start = Instant::now();
     verify(&params, &pp, &π);
