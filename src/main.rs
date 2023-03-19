@@ -40,13 +40,23 @@ struct Proof {
     agg_pk: G1
 }
 
-struct PreprocessedParams {
-    pks: Vec<G1>,
-    q1_coms : Vec<G1>,
-    q2_coms : Vec<G1>,
-    sk_com: G2,
-    vanishing_com: G2,
-    x_monomial_com: G2
+struct ProverPreprocessing {
+    n: usize, //size of the committee as a power of 2
+    pks: Vec<G1>, //g^sk_i for each party i
+    q1_coms : Vec<G1>, //preprocessed contributions for pssk_q1
+    q2_coms : Vec<G1>, //preprocessed contributions for pssk_q2
+}
+
+struct VerifierPreprocessing {
+    n: usize, //size of the committee as a power of 2
+    h_0: G2, //first element from the KZG SRS over G2
+    sk_com: G2, //commitment to the sigma_{i \in [N]} sk_i l_i(x) polynomial
+    vanishing_com: G2, //commitment to Z(x) = x^n - 1
+    x_monomial_com: G2 //commentment to f(x) = x
+}
+
+struct Cache {
+    lagrange_polynomials: Vec<DensePolynomial<F>>
 }
 
 fn sample_weights(n: usize) -> Vec<F> {
@@ -64,34 +74,69 @@ fn sample_bitmap(n: usize) -> Vec<F> {
     bitmap
 }
 
+fn prepare_cache(n: usize) -> Cache {
+    let mut lagrange_polynomials = vec![];
+    for i in 0..n {
+        let l_i_of_x = utils::lagrange_poly(n, i);
+        lagrange_polynomials.push(l_i_of_x);
+    }
+    Cache { lagrange_polynomials }
+} 
+
 fn main() {
-    let n = 1024;
+    let n = 32;
     println!("n = {}", n);
 
+    //contains commonly used objects such as lagrange polynomials
+    let cache = prepare_cache(n);
+
+    // -------------- sample one-time SRS ---------------
+    //run KZG setup
     let rng = &mut test_rng();
+    let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
 
+    // -------------- sample universe specific values ---------------
+    //sample random keys
     let mut sk: Vec<F> = sample_secret_keys(n - 1);
-    let mut bitmap = sample_bitmap(n - 1);
-    let mut weights = sample_weights(n - 1);
-
-    let total_active_weight = bitmap
-        .iter()
-        .zip(weights.iter())
-        .fold(F::from(0), |acc, (&x, &y)| acc + (x * y));
-
-    bitmap.push(F::from(1));
-    weights.push(F::from(0) - total_active_weight);
+    //last element must be 0
     sk.push(F::from(0));
+    //sample random weights for each party
+    let weights = sample_weights(n - 1);
+
+    // -------------- perform universe setup ---------------
+    //run universe setup
+    let (vp,pp) = setup(n, &params, &weights, &sk);
+
+    // -------------- sample proof specific values ---------------
+    //samples n-1 random bits
+    let bitmap = sample_bitmap(n - 1);
 
     let start = Instant::now();
-    let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
+    let π = prove(&params, &pp, &cache, &weights, &bitmap);
     let duration = start.elapsed();
-    println!("Time elapsed in kzg setup is: {:?}", duration);
+    println!("Time elapsed in prover is: {:?}", duration);
+    
 
+    let start = Instant::now();
+    verify(&vp, &π);
+    let duration = start.elapsed();
+    println!("Time elapsed in verifier is: {:?}", duration);
+}
+
+fn setup(
+    n: usize,
+    params: &UniversalParams<Bls12_381>,
+    weights: &Vec<F>,
+    sk: &Vec<F>
+) -> (VerifierPreprocessing, ProverPreprocessing)
+{
+    //allocate space to collect setup material from all n-1 parties
     let mut q1_contributions : Vec<Vec<G1>> = vec![];
-    let mut q2_coms : Vec<G1> = vec![];
+    let mut q2_contributions : Vec<G1> = vec![];
     let mut pks : Vec<G1> = vec![];
     let mut com_sks: Vec<G2> = vec![];
+    
+    //collect the setup phase material from all parties
     for i in 0..n {
         let start = Instant::now();
         let (pk_i, com_sk_l_i, q1_i, q2_i) = 
@@ -100,47 +145,60 @@ fn main() {
         println!("Time elapsed in party_i_setup_material is: {:?}", duration);
         
         q1_contributions.push(q1_i);
-        q2_coms.push(q2_i);
+        q2_contributions.push(q2_i);
         pks.push(pk_i);
         com_sks.push(com_sk_l_i);
     }
-    let start = Instant::now();
-    let q1_coms = preprocess_q1_contributions(&q1_contributions);
-    let duration = start.elapsed();
-    println!("Time elapsed in preprocess_q1_contributions is: {:?}", duration);
-    let sk_com = add_all_g2(&params, &com_sks);
 
     let z_of_x = utils::compute_vanishing_poly(n as u64);
-    let vanishing_com = KZG10::<Bls12_381, UniPoly381>::
-        commit_g2(&params, &z_of_x).unwrap();
-
     let x_monomial = utils::compute_x_monomial();
-    let x_monomial_com = KZG10::<Bls12_381, UniPoly381>::
-        commit_g2(&params, &x_monomial).unwrap();
 
-    let pp = PreprocessedParams { 
-        pks, q1_coms, q2_coms, sk_com, vanishing_com, x_monomial_com 
+    let vp = VerifierPreprocessing {
+        n: //size of the committee
+            n,
+        h_0: //first element of KZG SRS for G2
+            params.powers_of_h[0].clone(),
+        sk_com: //combine all sk_i l_i_of_x commitments to get commitment to sk(x)
+            add_all_g2(&params, &com_sks),
+        vanishing_com: //commitment to z(x) = x^n - 1
+            KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &z_of_x).unwrap(),
+        x_monomial_com: //commitment to f(x) = x
+            KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &x_monomial).unwrap(),
     };
 
-    let start = Instant::now();
-    let π = prove(&params, &pp, &weights, &bitmap);
-    let duration = start.elapsed();
-    println!("Time elapsed in prover is: {:?}", duration);
-    
+    let pp = ProverPreprocessing {
+        n: n,
+        pks: pks,
+        q1_coms: preprocess_q1_contributions(&q1_contributions),
+        q2_coms: q2_contributions,
+    };
 
-    let start = Instant::now();
-    verify(&params, &pp, &π);
-    let duration = start.elapsed();
-    println!("Time elapsed in verifier is: {:?}", duration);
+    (vp, pp)
+
 }
+
 
 fn prove(
     params: &UniversalParams<Bls12_381>,
-    pp: &PreprocessedParams, 
+    pp: &ProverPreprocessing,
+    cache: &Cache,
     weights: &Vec<F>, 
     bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
-    let n: u64 = pp.pks.len() as u64;
+    let n: u64 = pp.n as u64;
+
+    let mut weights = weights.clone();
+    //compute sum of weights of active signers
+    let total_active_weight = bitmap
+        .iter()
+        .zip(weights.iter())
+        .fold(F::from(0), |acc, (&x, &y)| acc + (x * y));
+    //weight's last element must the additive inverse of active weight
+    weights.push(F::from(0) - total_active_weight);
+
+    let mut bitmap = bitmap.clone();
+    //bitmap's last element must be 1 for our scheme
+    bitmap.push(F::from(1));
 
     let mut rng = test_rng();
     let r = F::rand(&mut rng);
@@ -171,7 +229,7 @@ fn prove(
 
     let sk_q1_com = filter_and_add(&params, &pp.q1_coms, &bitmap);
     let sk_q2_com = filter_and_add(&params, &pp.q2_coms, &bitmap);
-    let agg_pk = compute_apk(&pp, &bitmap);
+    let agg_pk = compute_apk(&pp, &bitmap, &cache);
 
     Proof {
         r,
@@ -191,11 +249,15 @@ fn prove(
     }
 }
 
-fn compute_apk(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
+fn compute_apk(
+    pp: &ProverPreprocessing, 
+    bitmap: &Vec<F>,
+    cache: &Cache) -> G1 {
     let n = bitmap.len();
     let mut exponents = vec![];
     for i in 0..n {
-        let l_i_of_x = utils::lagrange_poly(n, i);
+        //let l_i_of_x = utils::lagrange_poly(n, i);
+        let l_i_of_x = cache.lagrange_polynomials[i].clone();
         let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
         let active = bitmap[i] == F::from(1);
         exponents.push(if active { l_i_of_0 } else { F::from(0) });
@@ -205,14 +267,14 @@ fn compute_apk(pp: &PreprocessedParams, bitmap: &Vec<F>) -> G1 {
         ::msm(&pp.pks[..], &exponents).unwrap().into_affine()
 }
 
-fn verify(params: &UniversalParams<Bls12_381>, pp: &PreprocessedParams, π: &Proof) {
-    let n: u64 = pp.pks.len() as u64;
+fn verify(vp: &VerifierPreprocessing, π: &Proof) {
+    let n: u64 = vp.n as u64;
     let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
 
-    let lhs = <Bls12_381 as Pairing>::pairing(&π.b_com, &pp.sk_com);
-    let x1 = <Bls12_381 as Pairing>::pairing(&π.sk_q1_com, &pp.vanishing_com);
-    let x2 = <Bls12_381 as Pairing>::pairing(&π.sk_q2_com, &pp.x_monomial_com);
-    let x3 = <Bls12_381 as Pairing>::pairing(&π.agg_pk, &params.powers_of_h[0]);
+    let lhs = <Bls12_381 as Pairing>::pairing(&π.b_com, &vp.sk_com);
+    let x1 = <Bls12_381 as Pairing>::pairing(&π.sk_q1_com, &vp.vanishing_com);
+    let x2 = <Bls12_381 as Pairing>::pairing(&π.sk_q2_com, &vp.x_monomial_com);
+    let x3 = <Bls12_381 as Pairing>::pairing(&π.agg_pk, &vp.h_0);
     let rhs = x1.add(x2).add(x3);
     assert_eq!(lhs, rhs);
 
