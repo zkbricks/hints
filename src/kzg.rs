@@ -7,7 +7,7 @@ use ark_ec::{pairing::Pairing, CurveGroup};
 use ark_ec::{scalar_mul::fixed_base::FixedBase, VariableBaseMSM};
 use ark_ff::{One, PrimeField, UniformRand, Zero};
 use ark_poly::DenseUVPolynomial;
-use ark_std::{format, marker::PhantomData, ops::Div, ops::Mul, vec};
+use ark_std::{format, marker::PhantomData, ops::*, vec};
 
 use ark_std::rand::RngCore;
 #[cfg(feature = "parallel")]
@@ -46,6 +46,7 @@ where
     E: Pairing,
     P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField>,
     for<'a, 'b> &'a P: Div<&'b P, Output = P>,
+    for<'a, 'b> &'a P: Sub<&'b P, Output = P>,
 {
     /// Constructs public parameters when given as input the maximum degree `degree`
     /// for the polynomial commitment scheme.
@@ -177,6 +178,22 @@ where
 
         Ok(commitment.into_affine())
     }
+
+    pub fn compute_opening_proof(
+        params: &UniversalParams<E>,
+        polynomial: &P,
+        point: &E::ScalarField,
+    ) -> Result<E::G1Affine, Error> {
+        let eval = polynomial.evaluate(point);
+        let eval_as_poly = P::from_coefficients_vec(vec![eval]);
+        let numerator = polynomial.clone().sub(&eval_as_poly);
+        let divisor = P::from_coefficients_vec(
+            vec![E::ScalarField::zero() - point, E::ScalarField::one()]);
+        let witness_polynomial = numerator.div(&divisor);
+        
+        Self::commit_g1(params, &witness_polynomial)
+    }
+
 }
 
 fn skip_leading_zeros_and_convert_to_bigints<F: PrimeField, P: DenseUVPolynomial<F>>(

@@ -18,6 +18,7 @@ use kzg::*;
 mod utils;
 mod kzg;
 
+type KZG = KZG10::<Bls12_381, UniPoly381>;
 type UniPoly381 = DensePolynomial<<Bls12_381 as Pairing>::ScalarField>;
 type F = ark_bls12_381::Fr;
 type G1 = <Bls12_381 as Pairing>::G1Affine;
@@ -30,27 +31,37 @@ struct Proof {
     r: F,
 
     psw_of_r: F,
+    psw_of_r_proof: G1,
+
     psw_of_r_div_ω: F,
+    psw_of_r_div_ω_proof: G1,
+
     w_of_r: F,
+    w_of_r_proof: G1,
+
     b_of_r: F,
+    b_of_r_proof: G1,
+
     psw_wff_q_of_r: F,
+    psw_wff_q_of_r_proof: G1,
 
     l_n_minus_1_of_r: F,
+    l_n_minus_1_of_r_proof: G1,
+
     psw_check_q_of_r: F,
+    psw_check_q_of_r_proof: G1,
 
     b_wff_q_of_r: F,
+    b_wff_q_of_r_proof: G1,
 
     b_check_q_of_r: F,
+    b_check_q_of_r_proof: G1,
 
     psw_of_x_com: G1,
-    psw_of_x_div_ω_com: G1,
     b_of_x_com: G1,
     psw_wff_q_of_x_com: G1,
-
     psw_check_q_of_x_com: G1,
-    
     b_wff_q_of_x_com: G1,
-
     b_check_q_of_x_com: G1,
 
     sk_q1_com: G1,
@@ -66,7 +77,10 @@ struct ProverPreprocessing {
 
 struct VerifierPreprocessing {
     n: usize, //size of the committee as a power of 2
+    g_0: G1, //first element from the KZG SRS over G1
     h_0: G2, //first element from the KZG SRS over G2
+    h_1: G2, //2nd element from the KZG SRS over G2
+    l_n_minus_1_of_x_com: G1,
     w_of_x_com: G1,
     sk_of_x_com: G2, //commitment to the sigma_{i \in [N]} sk_i l_i(x) polynomial
     vanishing_com: G2, //commitment to Z(x) = x^n - 1
@@ -102,7 +116,7 @@ fn prepare_cache(n: usize) -> Cache {
 } 
 
 fn main() {
-    let n = 256;
+    let n = 32;
     println!("n = {}", n);
 
     //contains commonly used objects such as lagrange polynomials
@@ -111,7 +125,7 @@ fn main() {
     // -------------- sample one-time SRS ---------------
     //run KZG setup
     let rng = &mut test_rng();
-    let params = KZG10::<Bls12_381, UniPoly381>::setup(n, rng).expect("Setup failed");
+    let params = KZG::setup(n, rng).expect("Setup failed");
 
     // -------------- sample universe specific values ---------------
     //sample random keys
@@ -154,8 +168,7 @@ fn setup(
     weights.push(F::from(0));
 
     let w_of_x = compute_poly(&weights);
-    let w_of_x_com = KZG10::<Bls12_381, UniPoly381>::
-        commit_g1(&params, &w_of_x).unwrap();
+    let w_of_x_com = KZG::commit_g1(&params, &w_of_x).unwrap();
 
     //allocate space to collect setup material from all n-1 parties
     let mut q1_contributions : Vec<Vec<G1>> = vec![];
@@ -177,17 +190,19 @@ fn setup(
 
     let z_of_x = utils::compute_vanishing_poly(n);
     let x_monomial = utils::compute_x_monomial();
+    let l_n_minus_1_of_x = utils::lagrange_poly(n, n-1);
 
     let vp = VerifierPreprocessing {
         n: n,
+        g_0: params.powers_of_g[0].clone(),
         h_0: params.powers_of_h[0].clone(),
+        h_1: params.powers_of_h[1].clone(),
+        l_n_minus_1_of_x_com: KZG::commit_g1(&params, &l_n_minus_1_of_x).unwrap(),
         w_of_x_com: w_of_x_com,
         // combine all sk_i l_i_of_x commitments to get commitment to sk(x)
         sk_of_x_com: add_all_g2(&params, &com_sks),
-        vanishing_com: KZG10::<Bls12_381, UniPoly381>::
-            commit_g2(&params, &z_of_x).unwrap(),
-        x_monomial_com: KZG10::<Bls12_381, UniPoly381>::
-            commit_g2(&params, &x_monomial).unwrap(),
+        vanishing_com: KZG::commit_g2(&params, &z_of_x).unwrap(),
+        x_monomial_com: KZG::commit_g2(&params, &x_monomial).unwrap(),
     };
 
     let pp = ProverPreprocessing {
@@ -211,6 +226,7 @@ fn prove(
     // compute the nth root of unity
     let n = pp.n;
 
+    //adjust the weights and bitmap polynomials
     let mut weights = weights.clone();
     //compute sum of weights of active signers
     let total_active_weight = bitmap
@@ -270,35 +286,95 @@ fn prove(
         r,
         
         psw_of_r: psw_of_x.evaluate(&r),
+        psw_of_r_proof: KZG::compute_opening_proof(&params, &psw_of_x, &r).unwrap(),
+
         psw_of_r_div_ω: psw_of_x.evaluate(&r_div_ω),
+        psw_of_r_div_ω_proof: KZG::compute_opening_proof(&params, &psw_of_x, &r_div_ω).unwrap(),
+
         w_of_r: w_of_x.evaluate(&r),
+        w_of_r_proof: KZG::compute_opening_proof(&params, &w_of_x, &r).unwrap(),
+
         b_of_r: b_of_x.evaluate(&r),
+        b_of_r_proof: KZG::compute_opening_proof(&params, &b_of_x, &r).unwrap(),
+
         psw_wff_q_of_r: psw_wff_q_of_x.evaluate(&r),
+        psw_wff_q_of_r_proof: KZG::compute_opening_proof(&params, &psw_wff_q_of_x, &r).unwrap(),
 
         l_n_minus_1_of_r: l_n_minus_1_of_x.evaluate(&r),
+        l_n_minus_1_of_r_proof: KZG::compute_opening_proof(&params, &l_n_minus_1_of_x, &r).unwrap(),
+
         psw_check_q_of_r: psw_check_q_of_x.evaluate(&r),
+        psw_check_q_of_r_proof: KZG::compute_opening_proof(&params, &psw_check_q_of_x, &r).unwrap(),
 
         b_wff_q_of_r: b_wff_q_of_x.evaluate(&r),
+        b_wff_q_of_r_proof: KZG::compute_opening_proof(&params, &b_wff_q_of_x, &r).unwrap(),
 
         b_check_q_of_r: b_check_q_of_x.evaluate(&r),
+        b_check_q_of_r_proof: KZG::compute_opening_proof(&params, &b_check_q_of_x, &r).unwrap(),
 
-        psw_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_of_x).unwrap(),
-        psw_of_x_div_ω_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_of_x_div_ω).unwrap(),
-        b_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_of_x).unwrap(),
-        psw_wff_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_wff_q_of_x).unwrap(),
 
-        psw_check_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_check_q_of_x).unwrap(),
-
-        b_wff_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_wff_q_of_x).unwrap(),
-
-        b_check_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_check_q_of_x).unwrap(),
+        psw_of_x_com: KZG::commit_g1(&params, &psw_of_x).unwrap(),
+        b_of_x_com: KZG::commit_g1(&params, &b_of_x).unwrap(),
+        psw_wff_q_of_x_com: KZG::commit_g1(&params, &psw_wff_q_of_x).unwrap(),
+        psw_check_q_of_x_com: KZG::commit_g1(&params, &psw_check_q_of_x).unwrap(),
+        b_wff_q_of_x_com: KZG::commit_g1(&params, &b_wff_q_of_x).unwrap(),
+        b_check_q_of_x_com: KZG::commit_g1(&params, &b_check_q_of_x).unwrap(),
 
         sk_q1_com: sk_q1_com,
         sk_q2_com: sk_q2_com,
     }
 }
 
+fn verify_opening(
+    vp: &VerifierPreprocessing, 
+    commitment: G1,
+    point: F, 
+    evaluation: F,
+    opening_proof: G1) {
+    let eval_com: G1 = vp.g_0.clone().mul(evaluation).into();
+    let point_com: G2 = vp.h_0.clone().mul(point).into();
+
+    let lhs = <Bls12_381 as Pairing>::pairing(commitment - eval_com, vp.h_0);
+    let rhs = <Bls12_381 as Pairing>::pairing(opening_proof, vp.h_1 - point_com);
+    assert_eq!(lhs, rhs);
+}
+
+/*
+    psw_of_r_proof: G1,
+    psw_of_r_div_ω_proof: G1,
+    w_of_r_proof: G1,
+    b_of_r_proof: G1,
+    psw_wff_q_of_r_proof: G1,
+    l_n_minus_1_of_r_proof: G1,
+    psw_check_q_of_r_proof: G1,
+    b_wff_q_of_r_proof: G1,
+    b_check_q_of_r_proof: G1,
+ */
+
+fn verify_openings(vp: &VerifierPreprocessing, π: &Proof) {
+    //adjust the w_of_x_com
+    let adjustment = F::from(0) - π.agg_weight;
+    let adjustment_com = vp.l_n_minus_1_of_x_com.mul(adjustment);
+    let w_of_x_com: G1 = (vp.w_of_x_com + adjustment_com).into();
+
+    verify_opening(vp, w_of_x_com, π.r, π.w_of_r, π.w_of_r_proof);
+    verify_opening(vp, π.psw_of_x_com, π.r, π.psw_of_r, π.psw_of_r_proof);
+    verify_opening(vp, π.b_of_x_com, π.r, π.b_of_r, π.b_of_r_proof);
+    verify_opening(vp, π.psw_wff_q_of_x_com, π.r, π.psw_wff_q_of_r, π.psw_wff_q_of_r_proof);
+    verify_opening(vp, vp.l_n_minus_1_of_x_com, π.r, π.l_n_minus_1_of_r, π.l_n_minus_1_of_r_proof);
+    verify_opening(vp, π.psw_check_q_of_x_com, π.r, π.psw_check_q_of_r, π.psw_check_q_of_r_proof);
+    verify_opening(vp, π.b_wff_q_of_x_com, π.r, π.b_wff_q_of_r, π.b_wff_q_of_r_proof);
+    verify_opening(vp, π.b_check_q_of_x_com, π.r, π.b_check_q_of_r, π.b_check_q_of_r_proof);
+
+    let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
+    let ω: F = domain.group_gen;
+    let r_div_ω: F = π.r / ω;
+    verify_opening(vp, π.psw_of_x_com, r_div_ω, π.psw_of_r_div_ω, π.psw_of_r_div_ω_proof);
+}
+
 fn verify(vp: &VerifierPreprocessing, π: &Proof) {
+    verify_openings(vp, π);
+
     let n: u64 = vp.n as u64;
     let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
 
@@ -333,6 +409,7 @@ fn verify(vp: &VerifierPreprocessing, π: &Proof) {
     assert_eq!(lhs, rhs);
 
 }
+
 
 fn compute_apk(
     pp: &ProverPreprocessing, 
@@ -396,12 +473,12 @@ fn add_all_g2(
 
 fn get_zero_poly_com_g1(params: &UniversalParams<Bls12_381>) -> G1 {
     let zero_poly = utils::compute_constant_poly(&F::from(0));
-    KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &zero_poly).unwrap()
+    KZG::commit_g1(&params, &zero_poly).unwrap()
 }
 
 fn get_zero_poly_com_g2(params: &UniversalParams<Bls12_381>) -> G2 {
     let zero_poly = utils::compute_constant_poly(&F::from(0));
-    KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &zero_poly).unwrap()
+    KZG::commit_g2(&params, &zero_poly).unwrap()
 }
 
 fn sample_secret_keys(num_parties: usize) -> Vec<F> {
@@ -462,7 +539,7 @@ fn party_i_setup_material(
         let f = num.div(&z_of_x);
         let sk_times_f = utils::poly_eval_mult_c(&f, &sk_i);
 
-        let com = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_times_f)
+        let com = KZG::commit_g1(&params, &sk_times_f)
             .expect("commitment failed");
 
         q1_material.push(com);
@@ -475,17 +552,14 @@ fn party_i_setup_material(
     let den = x_monomial.clone();
     let f = num.div(&den);
     let sk_times_f = utils::poly_eval_mult_c(&f, &sk_i);
-    let q2_com = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_times_f)
-            .expect("commitment failed");
+    let q2_com = KZG::commit_g1(&params, &sk_times_f).expect("commitment failed");
 
     //release my public key
     let sk_as_poly = utils::compute_constant_poly(&sk_i);
-    let pk = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &sk_as_poly)
-        .expect("commitment failed");
+    let pk = KZG::commit_g1(&params, &sk_as_poly).expect("commitment failed");
 
     let sk_times_l_i_of_x = utils::poly_eval_mult_c(&l_i_of_x, &sk_i);
-    let com_sk_l_i = KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &sk_times_l_i_of_x)
-        .expect("commitment failed");
+    let com_sk_l_i = KZG::commit_g2(&params, &sk_times_l_i_of_x).expect("commitment failed");
 
     (pk, com_sk_l_i, q1_material, q2_com)
 }
