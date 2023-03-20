@@ -30,6 +30,8 @@ struct Proof {
 
     r: F,
 
+    merged_proof: G1,
+
     psw_of_r: F,
     psw_of_r_proof: G1,
 
@@ -279,39 +281,58 @@ fn prove(
     let sk_q2_com = filter_and_add(&params, &pp.q2_coms, &bitmap);
     let agg_pk = compute_apk(&pp, &bitmap, &cache);
 
+    let psw_of_r_proof = KZG::compute_opening_proof(&params, &psw_of_x, &r).unwrap();
+    let w_of_r_proof = KZG::compute_opening_proof(&params, &w_of_x, &r).unwrap();
+    let b_of_r_proof = KZG::compute_opening_proof(&params, &b_of_x, &r).unwrap();
+    let psw_wff_q_of_r_proof = KZG::compute_opening_proof(&params, &psw_wff_q_of_x, &r).unwrap();
+    let l_n_minus_1_of_r_proof = KZG::compute_opening_proof(&params, &l_n_minus_1_of_x, &r).unwrap();
+    let psw_check_q_of_r_proof = KZG::compute_opening_proof(&params, &psw_check_q_of_x, &r).unwrap();
+    let b_wff_q_of_r_proof = KZG::compute_opening_proof(&params, &b_wff_q_of_x, &r).unwrap();
+    let b_check_q_of_r_proof = KZG::compute_opening_proof(&params, &b_check_q_of_x, &r).unwrap();
+
+    let merged_proof: G1 = (psw_of_r_proof
+        + w_of_r_proof.mul(r.pow([1]))
+        + b_of_r_proof.mul(r.pow([2]))
+        + psw_wff_q_of_r_proof.mul(r.pow([3]))
+        + l_n_minus_1_of_r_proof.mul(r.pow([4]))
+        + psw_check_q_of_r_proof.mul(r.pow([5]))
+        + b_wff_q_of_r_proof.mul(r.pow([6]))
+        + b_check_q_of_r_proof.mul(r.pow([7]))).into();
+
     Proof {
         agg_pk: agg_pk.clone(),
         agg_weight: total_active_weight,
 
         r,
         
-        psw_of_r: psw_of_x.evaluate(&r),
-        psw_of_r_proof: KZG::compute_opening_proof(&params, &psw_of_x, &r).unwrap(),
-
         psw_of_r_div_ω: psw_of_x.evaluate(&r_div_ω),
         psw_of_r_div_ω_proof: KZG::compute_opening_proof(&params, &psw_of_x, &r_div_ω).unwrap(),
 
+        psw_of_r: psw_of_x.evaluate(&r),
+        psw_of_r_proof: psw_of_r_proof,
+
         w_of_r: w_of_x.evaluate(&r),
-        w_of_r_proof: KZG::compute_opening_proof(&params, &w_of_x, &r).unwrap(),
+        w_of_r_proof: w_of_r_proof,
 
         b_of_r: b_of_x.evaluate(&r),
-        b_of_r_proof: KZG::compute_opening_proof(&params, &b_of_x, &r).unwrap(),
+        b_of_r_proof: b_of_r_proof,
 
         psw_wff_q_of_r: psw_wff_q_of_x.evaluate(&r),
-        psw_wff_q_of_r_proof: KZG::compute_opening_proof(&params, &psw_wff_q_of_x, &r).unwrap(),
+        psw_wff_q_of_r_proof: psw_wff_q_of_r_proof,
 
         l_n_minus_1_of_r: l_n_minus_1_of_x.evaluate(&r),
-        l_n_minus_1_of_r_proof: KZG::compute_opening_proof(&params, &l_n_minus_1_of_x, &r).unwrap(),
+        l_n_minus_1_of_r_proof: l_n_minus_1_of_r_proof,
 
         psw_check_q_of_r: psw_check_q_of_x.evaluate(&r),
-        psw_check_q_of_r_proof: KZG::compute_opening_proof(&params, &psw_check_q_of_x, &r).unwrap(),
+        psw_check_q_of_r_proof: psw_check_q_of_r_proof,
 
         b_wff_q_of_r: b_wff_q_of_x.evaluate(&r),
-        b_wff_q_of_r_proof: KZG::compute_opening_proof(&params, &b_wff_q_of_x, &r).unwrap(),
+        b_wff_q_of_r_proof: b_wff_q_of_r_proof,
 
         b_check_q_of_r: b_check_q_of_x.evaluate(&r),
-        b_check_q_of_r_proof: KZG::compute_opening_proof(&params, &b_check_q_of_x, &r).unwrap(),
+        b_check_q_of_r_proof: b_check_q_of_r_proof,
 
+        merged_proof: merged_proof.into(),
 
         psw_of_x_com: KZG::commit_g1(&params, &psw_of_x).unwrap(),
         b_of_x_com: KZG::commit_g1(&params, &b_of_x).unwrap(),
@@ -327,29 +348,17 @@ fn prove(
 
 fn verify_opening(
     vp: &VerifierPreprocessing, 
-    commitment: G1,
-    point: F, 
-    evaluation: F,
-    opening_proof: G1) {
+    commitment: &G1,
+    point: &F, 
+    evaluation: &F,
+    opening_proof: &G1) {
     let eval_com: G1 = vp.g_0.clone().mul(evaluation).into();
     let point_com: G2 = vp.h_0.clone().mul(point).into();
 
-    let lhs = <Bls12_381 as Pairing>::pairing(commitment - eval_com, vp.h_0);
-    let rhs = <Bls12_381 as Pairing>::pairing(opening_proof, vp.h_1 - point_com);
+    let lhs = <Bls12_381 as Pairing>::pairing(commitment.clone() - eval_com, vp.h_0);
+    let rhs = <Bls12_381 as Pairing>::pairing(opening_proof.clone(), vp.h_1 - point_com);
     assert_eq!(lhs, rhs);
 }
-
-/*
-    psw_of_r_proof: G1,
-    psw_of_r_div_ω_proof: G1,
-    w_of_r_proof: G1,
-    b_of_r_proof: G1,
-    psw_wff_q_of_r_proof: G1,
-    l_n_minus_1_of_r_proof: G1,
-    psw_check_q_of_r_proof: G1,
-    b_wff_q_of_r_proof: G1,
-    b_check_q_of_r_proof: G1,
- */
 
 fn verify_openings(vp: &VerifierPreprocessing, π: &Proof) {
     //adjust the w_of_x_com
@@ -357,19 +366,56 @@ fn verify_openings(vp: &VerifierPreprocessing, π: &Proof) {
     let adjustment_com = vp.l_n_minus_1_of_x_com.mul(adjustment);
     let w_of_x_com: G1 = (vp.w_of_x_com + adjustment_com).into();
 
-    verify_opening(vp, w_of_x_com, π.r, π.w_of_r, π.w_of_r_proof);
-    verify_opening(vp, π.psw_of_x_com, π.r, π.psw_of_r, π.psw_of_r_proof);
-    verify_opening(vp, π.b_of_x_com, π.r, π.b_of_r, π.b_of_r_proof);
-    verify_opening(vp, π.psw_wff_q_of_x_com, π.r, π.psw_wff_q_of_r, π.psw_wff_q_of_r_proof);
-    verify_opening(vp, vp.l_n_minus_1_of_x_com, π.r, π.l_n_minus_1_of_r, π.l_n_minus_1_of_r_proof);
-    verify_opening(vp, π.psw_check_q_of_x_com, π.r, π.psw_check_q_of_r, π.psw_check_q_of_r_proof);
-    verify_opening(vp, π.b_wff_q_of_x_com, π.r, π.b_wff_q_of_r, π.b_wff_q_of_r_proof);
-    verify_opening(vp, π.b_check_q_of_x_com, π.r, π.b_check_q_of_r, π.b_check_q_of_r_proof);
+    verify_opening(vp, &w_of_x_com, &π.r, &π.w_of_r, &π.w_of_r_proof);
+    verify_opening(vp, &π.psw_of_x_com, &π.r, &π.psw_of_r, &π.psw_of_r_proof);
+    verify_opening(vp, &π.b_of_x_com, &π.r, &π.b_of_r, &π.b_of_r_proof);
+    verify_opening(vp, &π.psw_wff_q_of_x_com, &π.r, &π.psw_wff_q_of_r, &π.psw_wff_q_of_r_proof);
+    verify_opening(vp, &vp.l_n_minus_1_of_x_com, &π.r, &π.l_n_minus_1_of_r, &π.l_n_minus_1_of_r_proof);
+    verify_opening(vp, &π.psw_check_q_of_x_com, &π.r, &π.psw_check_q_of_r, &π.psw_check_q_of_r_proof);
+    verify_opening(vp, &π.b_wff_q_of_x_com, &π.r, &π.b_wff_q_of_r, &π.b_wff_q_of_r_proof);
+    verify_opening(vp, &π.b_check_q_of_x_com, &π.r, &π.b_check_q_of_r, &π.b_check_q_of_r_proof);
+
+    /*
+    let merged_proof = psw_of_r_proof
+        + w_of_r_proof.mul(r.pow([1]))
+        + b_of_r_proof.mul(r.pow([2]))
+        + psw_wff_q_of_r_proof.mul(r.pow([3]))
+        + l_n_minus_1_of_r_proof.mul(r.pow([4]))
+        + psw_check_q_of_r_proof.mul(r.pow([5]))
+        + b_wff_q_of_r_proof.mul(r.pow([6]))
+        + b_check_q_of_r_proof.mul(r.pow([7]));
+     */
+
+    let psw_of_r_argument = π.psw_of_x_com - vp.g_0.clone().mul(π.psw_of_r).into_affine();
+    let w_of_r_argument = w_of_x_com - vp.g_0.clone().mul(π.w_of_r).into_affine();
+    let b_of_r_argument = π.b_of_x_com - vp.g_0.clone().mul(π.b_of_r).into_affine();
+    let psw_wff_q_of_r_argument = π.psw_wff_q_of_x_com - vp.g_0.clone().mul(π.psw_wff_q_of_r).into_affine();
+    let l_n_minus_1_of_r_argument = vp.l_n_minus_1_of_x_com - vp.g_0.clone().mul(π.l_n_minus_1_of_r).into_affine();
+    let psw_check_q_of_r_argument = π.psw_check_q_of_x_com - vp.g_0.clone().mul(π.psw_check_q_of_r).into_affine();
+    let b_wff_q_of_r_argument = π.b_wff_q_of_x_com - vp.g_0.clone().mul(π.b_wff_q_of_r).into_affine();
+    let b_check_q_of_r_argument = π.b_check_q_of_x_com - vp.g_0.clone().mul(π.b_check_q_of_r).into_affine();
+
+    let merged_argument: G1 = (psw_of_r_argument
+        + w_of_r_argument.mul(π.r.pow([1]))
+        + b_of_r_argument.mul(π.r.pow([2]))
+        + psw_wff_q_of_r_argument.mul(π.r.pow([3]))
+        + l_n_minus_1_of_r_argument.mul(π.r.pow([4]))
+        + psw_check_q_of_r_argument.mul(π.r.pow([5]))
+        + b_wff_q_of_r_argument.mul(π.r.pow([6]))
+        + b_check_q_of_r_argument.mul(π.r.pow([7]))).into_affine();
+
+    let lhs = <Bls12_381 as Pairing>::pairing(
+        merged_argument, 
+        vp.h_0);
+    let rhs = <Bls12_381 as Pairing>::pairing(
+        π.merged_proof, 
+        vp.h_1 - vp.h_0.clone().mul(π.r).into_affine());
+    assert_eq!(lhs, rhs);
 
     let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
     let ω: F = domain.group_gen;
     let r_div_ω: F = π.r / ω;
-    verify_opening(vp, π.psw_of_x_com, r_div_ω, π.psw_of_r_div_ω, π.psw_of_r_div_ω_proof);
+    verify_opening(vp, &π.psw_of_x_com, &r_div_ω, &π.psw_of_r_div_ω, &π.psw_of_r_div_ω_proof);
 }
 
 fn verify(vp: &VerifierPreprocessing, π: &Proof) {
