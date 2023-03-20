@@ -12,7 +12,7 @@ use ark_poly::{
 type F = ark_bls12_381::Fr;
 
 //returns t(X) = X^n - 1
-pub fn compute_vanishing_poly(n: u64) -> DensePolynomial<F> {
+pub fn compute_vanishing_poly(n: usize) -> DensePolynomial<F> {
     let mut coeffs = vec![];
     for i in 0..n+1 {
         if i == 0 {

@@ -24,20 +24,37 @@ type G1 = <Bls12_381 as Pairing>::G1Affine;
 type G2 = <Bls12_381 as Pairing>::G2Affine;
 
 struct Proof {
+    agg_pk: G1,
+    agg_weight: F,
+
     r: F,
+
     psw_of_r: F,
-    psw_of_ωr: F,
-    psw_of_ω_pow_n_minus_1: F,
-    w_of_ωr: F,
+    psw_of_r_div_ω: F,
+    w_of_r: F,
     b_of_r: F,
-    b_of_ωr: F,
-    b_of_ω_pow_n_minus_1: F,
     psw_wff_q_of_r: F,
+
+    l_n_minus_1_of_r: F,
+    psw_check_q_of_r: F,
+
     b_wff_q_of_r: F,
-    b_com: G1,
+
+    b_check_q_of_r: F,
+
+    psw_of_x_com: G1,
+    psw_of_x_div_ω_com: G1,
+    b_of_x_com: G1,
+    psw_wff_q_of_x_com: G1,
+
+    psw_check_q_of_x_com: G1,
+    
+    b_wff_q_of_x_com: G1,
+
+    b_check_q_of_x_com: G1,
+
     sk_q1_com: G1,
     sk_q2_com: G1,
-    agg_pk: G1
 }
 
 struct ProverPreprocessing {
@@ -50,7 +67,8 @@ struct ProverPreprocessing {
 struct VerifierPreprocessing {
     n: usize, //size of the committee as a power of 2
     h_0: G2, //first element from the KZG SRS over G2
-    sk_com: G2, //commitment to the sigma_{i \in [N]} sk_i l_i(x) polynomial
+    w_of_x_com: G1,
+    sk_of_x_com: G2, //commitment to the sigma_{i \in [N]} sk_i l_i(x) polynomial
     vanishing_com: G2, //commitment to Z(x) = x^n - 1
     x_monomial_com: G2 //commentment to f(x) = x
 }
@@ -84,7 +102,7 @@ fn prepare_cache(n: usize) -> Cache {
 } 
 
 fn main() {
-    let n = 32;
+    let n = 256;
     println!("n = {}", n);
 
     //contains commonly used objects such as lagrange polynomials
@@ -97,9 +115,7 @@ fn main() {
 
     // -------------- sample universe specific values ---------------
     //sample random keys
-    let mut sk: Vec<F> = sample_secret_keys(n - 1);
-    //last element must be 0
-    sk.push(F::from(0));
+    let sk: Vec<F> = sample_secret_keys(n - 1);
     //sample random weights for each party
     let weights = sample_weights(n - 1);
 
@@ -130,6 +146,17 @@ fn setup(
     sk: &Vec<F>
 ) -> (VerifierPreprocessing, ProverPreprocessing)
 {
+    let mut weights = weights.clone();
+    let mut sk = sk.clone();
+
+    //last element must be 0
+    sk.push(F::from(0));
+    weights.push(F::from(0));
+
+    let w_of_x = compute_poly(&weights);
+    let w_of_x_com = KZG10::<Bls12_381, UniPoly381>::
+        commit_g1(&params, &w_of_x).unwrap();
+
     //allocate space to collect setup material from all n-1 parties
     let mut q1_contributions : Vec<Vec<G1>> = vec![];
     let mut q2_contributions : Vec<G1> = vec![];
@@ -138,11 +165,9 @@ fn setup(
     
     //collect the setup phase material from all parties
     for i in 0..n {
-        let start = Instant::now();
+
         let (pk_i, com_sk_l_i, q1_i, q2_i) = 
             party_i_setup_material(&params, n, i, &sk[i]);
-        let duration = start.elapsed();
-        println!("Time elapsed in party_i_setup_material is: {:?}", duration);
         
         q1_contributions.push(q1_i);
         q2_contributions.push(q2_i);
@@ -150,20 +175,19 @@ fn setup(
         com_sks.push(com_sk_l_i);
     }
 
-    let z_of_x = utils::compute_vanishing_poly(n as u64);
+    let z_of_x = utils::compute_vanishing_poly(n);
     let x_monomial = utils::compute_x_monomial();
 
     let vp = VerifierPreprocessing {
-        n: //size of the committee
-            n,
-        h_0: //first element of KZG SRS for G2
-            params.powers_of_h[0].clone(),
-        sk_com: //combine all sk_i l_i_of_x commitments to get commitment to sk(x)
-            add_all_g2(&params, &com_sks),
-        vanishing_com: //commitment to z(x) = x^n - 1
-            KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &z_of_x).unwrap(),
-        x_monomial_com: //commitment to f(x) = x
-            KZG10::<Bls12_381, UniPoly381>::commit_g2(&params, &x_monomial).unwrap(),
+        n: n,
+        h_0: params.powers_of_h[0].clone(),
+        w_of_x_com: w_of_x_com,
+        // combine all sk_i l_i_of_x commitments to get commitment to sk(x)
+        sk_of_x_com: add_all_g2(&params, &com_sks),
+        vanishing_com: KZG10::<Bls12_381, UniPoly381>::
+            commit_g2(&params, &z_of_x).unwrap(),
+        x_monomial_com: KZG10::<Bls12_381, UniPoly381>::
+            commit_g2(&params, &x_monomial).unwrap(),
     };
 
     let pp = ProverPreprocessing {
@@ -185,7 +209,7 @@ fn prove(
     weights: &Vec<F>, 
     bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
-    let n: u64 = pp.n as u64;
+    let n = pp.n;
 
     let mut weights = weights.clone();
     //compute sum of weights of active signers
@@ -203,50 +227,111 @@ fn prove(
     let mut rng = test_rng();
     let r = F::rand(&mut rng);
 
+    //compute all the scalars we will need in the prover
     let domain = Radix2EvaluationDomain::<F>::new(n as usize).unwrap();
     let ω: F = domain.group_gen;
-    let ωr: F = ω * r;
-    let ω_pow_n_minus_1: F = ω.pow([n-1]);
+    let r_div_ω: F = r / ω;
+    let ω_inv: F = F::from(1) / ω;
 
-    let w_of_x = compute_poly(&weights);
-    let w_of_ωx = utils::poly_domain_mult_ω(&w_of_x, &ω);
-
-    let b_of_x = compute_poly(&bitmap);
-    let b_of_ωx = utils::poly_domain_mult_ω(&b_of_x, &ω);
-    let b_com = KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_of_x).unwrap();
-
-    let psw_of_x = compute_psw_poly(&weights, &bitmap);
-    let psw_of_ωx = utils::poly_domain_mult_ω(&psw_of_x, &ω);
-
+    //compute all the polynomials we will need in the prover
     let z_of_x = utils::compute_vanishing_poly(n); //returns Z(X) = X^n - 1
+    let l_n_minus_1_of_x = utils::lagrange_poly(n, n-1);
+    let w_of_x = compute_poly(&weights);
+    let b_of_x = compute_poly(&bitmap);
+    let psw_of_x = compute_psw_poly(&weights, &bitmap);
+    let psw_of_x_div_ω = utils::poly_domain_mult_ω(&psw_of_x, &ω_inv);
 
-    //t(X) = ParSumW(ω · X) − ParSumW(X) − W(ω · X) · b(ω · X)
-    let t_of_x = psw_of_ωx.sub(&psw_of_x).sub(&w_of_ωx.mul(&b_of_ωx));
+
+    //ParSumW(X) = ParSumW(X/ω) + W(X) · b(X) + Z(X) · Q1(X)
+    let t_of_x = psw_of_x.sub(&psw_of_x_div_ω).sub(&w_of_x.mul(&b_of_x));
     let psw_wff_q_of_x = t_of_x.div(&z_of_x);
 
+    //L_{n−1}(X) · ParSumW(X) = Z(X) · Q2(X) 
+    let t_of_x = l_n_minus_1_of_x.mul(&psw_of_x);
+    let psw_check_q_of_x = t_of_x.div(&z_of_x);
+
+    //b(X) · b(X) − b(X) = Z(X) · Q3(X)
     let t_of_x = b_of_x.mul(&b_of_x).sub(&b_of_x);
     let b_wff_q_of_x = t_of_x.div(&z_of_x);
+
+    //L_{n−1}(X) · (b(X) - 1) = Z(X) · Q4(X)
+    let t_of_x = l_n_minus_1_of_x.clone().mul(
+        &b_of_x.clone().sub(&utils::compute_constant_poly(&F::from(1))));
+    let b_check_q_of_x = t_of_x.div(&z_of_x);
 
     let sk_q1_com = filter_and_add(&params, &pp.q1_coms, &bitmap);
     let sk_q2_com = filter_and_add(&params, &pp.q2_coms, &bitmap);
     let agg_pk = compute_apk(&pp, &bitmap, &cache);
 
     Proof {
+        agg_pk: agg_pk.clone(),
+        agg_weight: total_active_weight,
+
         r,
+        
         psw_of_r: psw_of_x.evaluate(&r),
-        psw_of_ωr: psw_of_x.evaluate(&ωr),
-        psw_of_ω_pow_n_minus_1: psw_of_x.evaluate(&ω_pow_n_minus_1),
-        w_of_ωr: w_of_x.evaluate(&ωr),
+        psw_of_r_div_ω: psw_of_x.evaluate(&r_div_ω),
+        w_of_r: w_of_x.evaluate(&r),
         b_of_r: b_of_x.evaluate(&r),
-        b_of_ωr: b_of_x.evaluate(&ωr),
-        b_of_ω_pow_n_minus_1: b_of_x.evaluate(&ω_pow_n_minus_1),
         psw_wff_q_of_r: psw_wff_q_of_x.evaluate(&r),
+
+        l_n_minus_1_of_r: l_n_minus_1_of_x.evaluate(&r),
+        psw_check_q_of_r: psw_check_q_of_x.evaluate(&r),
+
         b_wff_q_of_r: b_wff_q_of_x.evaluate(&r),
-        b_com: b_com,
+
+        b_check_q_of_r: b_check_q_of_x.evaluate(&r),
+
+        psw_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_of_x).unwrap(),
+        psw_of_x_div_ω_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_of_x_div_ω).unwrap(),
+        b_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_of_x).unwrap(),
+        psw_wff_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_wff_q_of_x).unwrap(),
+
+        psw_check_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &psw_check_q_of_x).unwrap(),
+
+        b_wff_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_wff_q_of_x).unwrap(),
+
+        b_check_q_of_x_com: KZG10::<Bls12_381, UniPoly381>::commit_g1(&params, &b_check_q_of_x).unwrap(),
+
         sk_q1_com: sk_q1_com,
         sk_q2_com: sk_q2_com,
-        agg_pk: agg_pk.clone(),
     }
+}
+
+fn verify(vp: &VerifierPreprocessing, π: &Proof) {
+    let n: u64 = vp.n as u64;
+    let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
+
+    //assert polynomial identity for the secret part
+    let lhs = <Bls12_381 as Pairing>::pairing(&π.b_of_x_com, &vp.sk_of_x_com);
+    let x1 = <Bls12_381 as Pairing>::pairing(&π.sk_q1_com, &vp.vanishing_com);
+    let x2 = <Bls12_381 as Pairing>::pairing(&π.sk_q2_com, &vp.x_monomial_com);
+    let x3 = <Bls12_381 as Pairing>::pairing(&π.agg_pk, &vp.h_0);
+    let rhs = x1.add(x2).add(x3);
+    assert_eq!(lhs, rhs);
+
+    //assert checks on the public part
+
+    //ParSumW(r) − ParSumW(r/ω) − W(r) · b(r) = Q(r) · (r^n − 1)
+    let lhs = π.psw_of_r - π.psw_of_r_div_ω - π.w_of_r * π.b_of_r;
+    let rhs = π.psw_wff_q_of_r * vanishing_of_r;
+    assert_eq!(lhs, rhs);
+
+    //Ln−1(X) · ParSumW(X) = Z(X) · Q2(X)
+    let lhs = π.l_n_minus_1_of_r * π.psw_of_r;
+    let rhs = vanishing_of_r * π.psw_check_q_of_r;
+    assert_eq!(lhs, rhs);
+
+    //b(r) * b(r) - b(r) = Q(r) · (r^n − 1)
+    let lhs = π.b_of_r * π.b_of_r - π.b_of_r;
+    let rhs = π.b_wff_q_of_r * vanishing_of_r;
+    assert_eq!(lhs, rhs);
+
+    //Ln−1(X) · (b(X) − 1) = Z(X) · Q4(X)
+    let lhs = π.l_n_minus_1_of_r * (π.b_of_r - F::from(1));
+    let rhs = vanishing_of_r * π.b_check_q_of_r;
+    assert_eq!(lhs, rhs);
+
 }
 
 fn compute_apk(
@@ -265,34 +350,6 @@ fn compute_apk(
 
     <<Bls12_381 as Pairing>::G1 as VariableBaseMSM>
         ::msm(&pp.pks[..], &exponents).unwrap().into_affine()
-}
-
-fn verify(vp: &VerifierPreprocessing, π: &Proof) {
-    let n: u64 = vp.n as u64;
-    let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
-
-    let lhs = <Bls12_381 as Pairing>::pairing(&π.b_com, &vp.sk_com);
-    let x1 = <Bls12_381 as Pairing>::pairing(&π.sk_q1_com, &vp.vanishing_com);
-    let x2 = <Bls12_381 as Pairing>::pairing(&π.sk_q2_com, &vp.x_monomial_com);
-    let x3 = <Bls12_381 as Pairing>::pairing(&π.agg_pk, &vp.h_0);
-    let rhs = x1.add(x2).add(x3);
-    assert_eq!(lhs, rhs);
-
-    //b(r) * b(r) - b(r) = Q(r) · (r^n − 1)
-    let tmp1 = π.b_of_r * π.b_of_r - π.b_of_r;
-    let tmp2 = π.b_wff_q_of_r * vanishing_of_r;
-    assert_eq!(tmp1, tmp2);
-
-    //ParSumW(ωr) − ParSumW(r) − W(ωr) · b(ωr) = Q'(r) · (r^n − 1)
-    let tmp1 = π.psw_of_ωr - π.psw_of_r - π.w_of_ωr * π.b_of_ωr;
-    let tmp2 = π.psw_wff_q_of_r * vanishing_of_r;
-    assert_eq!(tmp1, tmp2);
-
-    //ParSumW(ωn−1) = 0
-    assert_eq!(π.psw_of_ω_pow_n_minus_1, F::from(0));
-
-    //b(ωn−1) = 1
-    assert_eq!(π.b_of_ω_pow_n_minus_1, F::from(1));
 }
 
 fn preprocess_q1_contributions(
@@ -390,7 +447,7 @@ fn party_i_setup_material(
     sk_i: &F) -> (G1, G2, Vec<G1>, G1) {
     //let us compute the q1 term
     let l_i_of_x = utils::lagrange_poly(n, i);
-    let z_of_x = utils::compute_vanishing_poly(n as u64);
+    let z_of_x = utils::compute_vanishing_poly(n);
 
     let mut q1_material = vec![];
     //let us compute the cross terms of q1
