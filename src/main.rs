@@ -102,7 +102,7 @@ fn prepare_cache(n: usize) -> Cache {
 } 
 
 fn main() {
-    let n = 64;
+    let n = 256;
     println!("n = {}", n);
 
     //contains commonly used objects such as lagrange polynomials
@@ -163,15 +163,24 @@ fn setup(
     let mut com_sks: Vec<G2> = vec![];
     
     //collect the setup phase material from all parties
-    for i in 0..n {
+    let all_parties_setup = crossbeam::scope(|s| {
+        let mut threads = Vec::new();
+        for i in 0..n {
+            let idx = i.clone();
+            let n = n.clone();
+            let sk = sk[idx];
+            let thread_i = s.spawn(move |_| party_i_setup_material(&params, n, idx, &sk));
+            threads.push(thread_i);
+        }
 
-        let (pk_i, com_sk_l_i, q1_i, q2_i) = 
-            party_i_setup_material(&params, n, i, &sk[i]);
-        
-        q1_contributions.push(q1_i);
-        q2_contributions.push(q2_i);
-        pks.push(pk_i);
-        com_sks.push(com_sk_l_i);
+        threads.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>()
+    }).unwrap();
+
+    for (pk_i, com_sk_l_i, q1_i, q2_i) in all_parties_setup {
+        q1_contributions.push(q1_i.clone());
+        q2_contributions.push(q2_i.clone());
+        pks.push(pk_i.clone());
+        com_sks.push(com_sk_l_i.clone());
     }
 
     let z_of_x = utils::compute_vanishing_poly(n);
