@@ -8,6 +8,7 @@ use ark_poly::{
     Radix2EvaluationDomain,
     Evaluations
 };
+use ark_std::rand::Rng;
 use ark_std::{UniformRand, test_rng, ops::*};
 use ark_bls12_381::{Bls12_381};
 use ark_ec::{pairing::Pairing, CurveGroup};
@@ -82,12 +83,14 @@ fn sample_weights(n: usize) -> Vec<F> {
     (0..n).map(|_| F::from(u64::rand(&mut rng))).collect()
 }
 
-fn sample_bitmap(n: usize) -> Vec<F> {
-    let mut rng = &mut test_rng();
+/// n is the size of the bitmap, and probability is for true or 1.
+fn sample_bitmap(n: usize, probability: f64) -> Vec<F> {
+    let rng = &mut test_rng();
     let mut bitmap = vec![];
     for _i in 0..n {
-        let r = u64::rand(&mut rng);
-        bitmap.push(F::from(r % 2));
+        //let r = u64::rand(&mut rng);
+        let bit = rng.gen_bool(probability);
+        bitmap.push(F::from(bit));
     }
     bitmap
 }
@@ -102,7 +105,7 @@ fn prepare_cache(n: usize) -> Cache {
 } 
 
 fn main() {
-    let n = 256;
+    let n = 64;
     println!("n = {}", n);
 
     //contains commonly used objects such as lagrange polynomials
@@ -125,7 +128,7 @@ fn main() {
 
     // -------------- sample proof specific values ---------------
     //samples n-1 random bits
-    let bitmap = sample_bitmap(n - 1);
+    let bitmap = sample_bitmap(n - 1, 0.9);
 
     let start = Instant::now();
     let π = prove(&params, &pp, &cache, &weights, &bitmap);
